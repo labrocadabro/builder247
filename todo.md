@@ -7,7 +7,7 @@
   - Setup .gitignore
   - Create basic README.md
 
-- [ ] 2. API Integration
+- [x] 2. API Integration
   - Load API key from .env
   - Create basic client wrapper
   - Test basic message functionality
