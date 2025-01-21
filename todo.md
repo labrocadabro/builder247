@@ -13,7 +13,7 @@
   - Test basic message functionality
 
 ## Tool Implementation
-- [ ] 3. File System Tools
+- [x] 3. File System Tools
   - Implement file reading capability
   - Implement file writing capability
   - Add directory listing functionality
