@@ -26,7 +26,7 @@
    - [ ] Test with different Linux distributions
 
 4. **Claude 3.5 Sonnet Migration**:
-   - [ ] [TODO-13] Claude 3.5 Sonnet Migration
+   - [x] Claude 3.5 Sonnet Migration
      - Acceptance Criteria:
        - Environment files use claude-3-sonnet-20240229
        - Client initialization uses correct model
@@ -41,10 +41,26 @@
        3. Run test suite
        4. Document changes
 
+5. **[TODO-14] File Permission Error Handling**:
+   - Acceptance Criteria:
+     - Scripts handle permission denied errors gracefully
+     - Clear error messages for permission issues
+     - README documents Linux permission requirements
+     - All scripts check permissions before execution
+   - Test Cases:
+     a. Test script execution without execute permission
+     b. Test file writing without write permission
+     c. Test directory access without read permission
+     d. Verify error messages are user-friendly
+   - Implementation Steps:
+     1. Add permission check utilities
+     2. Implement error handling wrappers
+     3. Update script bootstrapping
+     4. Document requirements in README
+
 ### Next Steps
-1. Implement error handling for permission denied cases
-2. Update README with Linux-specific setup instructions
-3. Add more comprehensive path handling tests
+1. Update README with Linux-specific setup instructions
+2. Add more comprehensive path handling tests
 
 ## Completed
 - [x] SDK and API Migration [TODO-10]
@@ -52,6 +68,16 @@
   - Using Claude 3.5 API
   - All initial tests passing
   - No dependency conflicts
+- [x] Claude 3.5 Sonnet Migration [TODO-13]
+  - Updated environment configuration
+  - Verified client compatibility
+  - All tests passing
+  - Documentation updated
+- [x] File Permission Error Handling [TODO-14]
+  - Added permission check utilities
+  - Improved error messages
+  - Added comprehensive test suite
+  - Updated documentation
 
 ## Backlog
 - [ ] Code Documentation [TODO-11]
