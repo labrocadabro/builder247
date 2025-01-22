@@ -28,7 +28,7 @@ class AnthropicClient:
 
         # Initialize client with latest SDK
         self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-2.1"  # Use model compatible with SDK v0.7.7
+        self.model = "claude-3-sonnet-20240229"  # Latest Claude 3 model
         self.conversation_history = []
 
         # Set up logging
