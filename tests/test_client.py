@@ -165,7 +165,7 @@ def test_send_message():
             client = AnthropicClient()
             response = client.send_message("Hi", system="Be helpful")
 
-            assert response == "Hello, world!"
+            assert response == 'Hello, world!' 
             mock_client.messages.create.assert_called_once()
             call_args = mock_client.messages.create.call_args[1]
             assert call_args["system"] == "Be helpful"
