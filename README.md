@@ -13,7 +13,7 @@ A Python-based CLI tool that integrates with Anthropic's Claude 3 API to provide
 
 ## Linux Setup
 
-1. Ensure you have Python 3.12+ and pip installed:
+1. Ensure you have Python 3.12 and pip installed:
    ```bash
    python3 --version
    pip3 --version
