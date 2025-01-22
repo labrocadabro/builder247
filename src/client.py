@@ -354,6 +354,9 @@ class AnthropicClient:
             tools_used = []
 
         try:
+            # Wait for rate limit before sending the request
+            self._wait_for_rate_limit()
+
             # Prepare messages list
             messages = []
             if system:
