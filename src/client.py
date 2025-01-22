@@ -10,15 +10,19 @@ from pathlib import Path
 from dotenv import load_dotenv
 import anthropic
 import time
+from collections import deque
+from threading import Lock
 
 class AnthropicClient:
     """Wrapper for Anthropic API client with tool integration."""
     
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, rate_limit_per_minute: int = 50, retry_attempts: int = 3):
         """Initialize the client.
 
         Args:
             api_key: Optional API key. If not provided, will look for CLAUDE_API_KEY environment variable.
+            rate_limit_per_minute: Maximum number of requests per minute.
+            retry_attempts: Number of retry attempts for failed requests.
         """
         # Get API key from environment if not provided
         if not api_key:
@@ -27,16 +31,21 @@ class AnthropicClient:
                 raise ValueError("Failed to initialize Anthropic client: API key is required")
 
         # Initialize client with latest SDK
-        try:
-            self.client = anthropic.Client(api_key=api_key)
-        except Exception as e:
-            raise ValueError(f"Failed to initialize Anthropic client: {str(e)}")
-
-        # Set model and initialize conversation history
+        self.client = anthropic.Client(api_key=api_key)
         self.model = "claude-3-sonnet-20240229"
         self.conversation_history = []
-
-        # Set up logging
+        
+        # Rate limiting setup
+        self.rate_limit_per_minute = rate_limit_per_minute
+        self.request_times = deque()
+        self.rate_limit_lock = Lock()
+        
+        # Retry configuration
+        self.retry_attempts = retry_attempts
+        self.retry_count = 0
+        self.base_delay = 1  # Base delay in seconds
+        
+        # Setup logging
         self.setup_logging()
         self.log_interaction({
             "timestamp": datetime.now().isoformat(),
@@ -71,101 +80,103 @@ class AnthropicClient:
         """
         self.logger.info(json.dumps(data))
     
-    def send_message(self, prompt: str, system: str = None, tools_used: List[Dict] = None, tool_responses: List[str] = None) -> str:
-        """Send a message to the Claude API and log the interaction.
+    def _wait_for_rate_limit(self):
+        """Wait if necessary to comply with rate limits."""
+        with self.rate_limit_lock:
+            now = time.time()
+            
+            # Remove requests older than 60 seconds
+            while self.request_times and now - self.request_times[0] > 60:
+                self.request_times.popleft()
+            
+            # If at rate limit, wait until oldest request expires
+            if len(self.request_times) >= self.rate_limit_per_minute:
+                sleep_time = 60 - (now - self.request_times[0])
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            
+            # Add current request time
+            self.request_times.append(now)
+
+    def _handle_retry(self, error: Exception, prompt: str) -> Optional[str]:
+        """Handle retrying failed requests with exponential backoff.
+        
+        Args:
+            error: The error that occurred
+            prompt: The prompt that failed
+            
+        Returns:
+            Response content if retry succeeds, None if max retries exceeded
+            
+        Raises:
+            Original error if max retries exceeded
+        """
+        if not isinstance(error, (anthropic.APIStatusError, anthropic.APITimeoutError, anthropic.APIConnectionError)):
+            raise error
+            
+        if self.retry_count >= self.retry_attempts:
+            self.retry_count = 0  # Reset for next request
+            raise error
+            
+        # Exponential backoff
+        delay = self.base_delay * (2 ** self.retry_count)
+        time.sleep(delay)
+        
+        self.retry_count += 1
+        return self.send_message(prompt)
+
+    def send_message(self, prompt: str, system: str = None) -> str:
+        """Send a message to Claude and get the response.
         
         Args:
             prompt: The message to send
             system: Optional system prompt
-            tools_used: List of tools used in processing this message, each with name and args
-            tool_responses: List of responses from tools used
-        
+            
         Returns:
-            The response from Claude
+            Claude's response text
             
         Raises:
-            RuntimeError: If there is an error sending the message
+            Various API errors that may occur
         """
         try:
-            # Format tool usage history (limit to last 3 tools)
-            tool_history = ""
-            if tools_used:
-                tool_history = "\nRecent tools used:\n"
-                for tool in tools_used[-3:]:
-                    tool_history += f"- {tool['name']}\n"
+            # Wait for rate limit if needed
+            self._wait_for_rate_limit()
             
-            # Format tool responses (limit to last response)
-            response_history = ""
-            if tool_responses:
-                response_history = "\nLast tool response:\n" + tool_responses[-1]
+            # Construct message
+            messages = [{"role": "user", "content": prompt}]
+            if system:
+                messages.insert(0, {"role": "system", "content": system})
             
-            # Create system prompt that enables tool usage
-            default_system = """You are a powerful agentic AI coding assistant with access to filesystem tools. You have direct access to these tools and MUST use them to explore and analyze code repositories. The tools are already set up and ready to use - you just need to call them.
-
-Available tools that you can and should use RIGHT NOW:
-- list_dir: Lists contents of a directory
-- read_file: Reads contents of a file
-- grep_search: Searches for patterns in files
-- file_search: Searches for files by name
-- codebase_search: Semantic search across the codebase
-
-You MUST use these tools to gather information. Do not say you don't have access - you do! Start by using list_dir(".") to see what's available."""
-
-            system_prompt = system if system else default_system
-            if tool_history or response_history:
-                system_prompt = f"{system_prompt.rstrip()}{tool_history}{response_history}"
-            
-            # Create message using messages API format
+            # Send request
             response = self.client.messages.create(
                 model=self.model,
-                system=system_prompt,
-                messages=[
-                    *[{"role": msg["role"], "content": msg["content"]} for msg in self.conversation_history[-6:]],
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1024,
-                temperature=0
+                messages=messages
             )
-            response_text = response.content[0].text
             
-            # Add message to conversation history
+            # Reset retry count on success
+            self.retry_count = 0
+            
+            # Update conversation history
             self.conversation_history.extend([
-                {
-                    "role": "user",
-                    "content": prompt
-                },
-                {
-                    "role": "assistant", 
-                    "content": response_text
-                }
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": response.content}
             ])
             
-            # Log the interaction
-            self.log_interaction({
-                "timestamp": datetime.now().isoformat(),
-                "prompt": prompt,
-                "response_summary": response_text,
-                "tools_used": tools_used or [],
-                "tool_responses": tool_responses or []
-            })
-            
-            return response_text
+            return response.content
             
         except Exception as e:
-            error_msg = f"Error sending message: {str(e)}"
-            # Log the error
-            self.log_interaction({
-                "timestamp": datetime.now().isoformat(),
-                "error": error_msg,
-                "prompt": prompt
-            })
-            raise RuntimeError(error_msg)
+            # Attempt retry if appropriate
+            retry_response = self._handle_retry(e, prompt)
+            if retry_response is not None:
+                return retry_response
+            raise
     
     def clear_history(self):
         """Clear the conversation history."""
         self.conversation_history = []
         self.log_interaction({
             "timestamp": datetime.now().isoformat(),
-            "event": "clear_history",
-            "message": "Conversation history cleared"
+            "prompt": "CLEAR",
+            "response_summary": "Conversation history cleared",
+            "tools_used": [{"tool": "clear_history"}]
         }) 
