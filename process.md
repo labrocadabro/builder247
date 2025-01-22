@@ -22,6 +22,7 @@
      - Type hints
 
 4. **Version Control**
+   - Always checkout a new branch before starting a new task
    - Commit messages should follow format: `[TODO-#] Description`
    - Each commit should reference the specific todo item
    - Commits should be atomic and focused
