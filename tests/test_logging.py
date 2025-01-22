@@ -9,14 +9,13 @@ from unittest.mock import patch, MagicMock
 from src.client import AnthropicClient
 
 @pytest.fixture
-def cleanup_logs():
-    """Clean up log files after tests."""
-    yield
+def preserve_logs():
+    """Fixture to ensure logs directory exists."""
     log_dir = Path("logs")
-    for f in log_dir.glob("prompt_log_*.jsonl"):
-        f.unlink()
+    log_dir.mkdir(exist_ok=True)
+    yield log_dir
 
-def test_log_file_creation(cleanup_logs):
+def test_log_file_creation(preserve_logs):
     """Test that log files are created correctly."""
     with patch.dict(os.environ, {"CLAUDE_API_KEY": "test-key"}):
         with patch("anthropic.Client") as mock_client_class:
@@ -29,11 +28,17 @@ def test_log_file_creation(cleanup_logs):
             
             # Verify log file was created
             log_files = list(log_dir.glob("prompt_log_*.jsonl"))
-            assert len(log_files) == 1
-            assert log_files[0].name.startswith("prompt_log_")
-            assert log_files[0].name.endswith(".jsonl")
+            assert len(log_files) >= 1  # At least one log file exists
+            latest_log = max(log_files, key=lambda f: f.stat().st_mtime)
+            assert latest_log.name.startswith("prompt_log_")
+            assert latest_log.name.endswith(".jsonl")
+            
+            # Verify log file is preserved
+            log_content = latest_log.read_text()
+            assert log_content  # Log file has content
+            assert "Client initialized" in log_content
 
-def test_log_content(cleanup_logs):
+def test_log_content(preserve_logs):
     """Test that interactions are logged correctly."""
     test_prompt = "Test prompt"
     test_response = "Test response"
@@ -53,9 +58,10 @@ def test_log_content(cleanup_logs):
             
             # Find and read log file
             log_files = list(Path("logs").glob("prompt_log_*.jsonl"))
-            assert len(log_files) == 1
+            assert len(log_files) >= 1
+            latest_log = max(log_files, key=lambda f: f.stat().st_mtime)
             
-            log_content = log_files[0].read_text().splitlines()
+            log_content = latest_log.read_text().splitlines()
             assert len(log_content) >= 2  # Init message + interaction
             
             # Parse last log entry
@@ -66,26 +72,29 @@ def test_log_content(cleanup_logs):
             assert last_entry["prompt"] == test_prompt
             assert last_entry["response_summary"] == test_response
 
-def test_log_rotation(cleanup_logs):
+def test_log_rotation(preserve_logs):
     """Test that multiple sessions create separate log files."""
     with patch.dict(os.environ, {"CLAUDE_API_KEY": "test-key"}):
         with patch("anthropic.Client") as mock_client_class:
+            # Record initial log count
+            initial_logs = set(Path("logs").glob("prompt_log_*.jsonl"))
+            
             # Create multiple clients with small delays
             clients = []
             for _ in range(3):
                 clients.append(AnthropicClient())
                 time.sleep(0.001)  # Small delay to ensure unique timestamps
             
-            # Verify separate log files were created
-            log_files = list(Path("logs").glob("prompt_log_*.jsonl"))
-            assert len(log_files) == 3
+            # Verify new log files were created
+            current_logs = set(Path("logs").glob("prompt_log_*.jsonl"))
+            new_logs = current_logs - initial_logs
+            assert len(new_logs) == 3
             
             # Verify timestamps in filenames are unique
-            # Get full timestamp including microseconds
-            timestamps = [f.name.split("_", 2)[2].split(".")[0] for f in log_files]
+            timestamps = [f.name.split("_", 2)[2].split(".")[0] for f in new_logs]
             assert len(set(timestamps)) == 3
 
-def test_error_logging(cleanup_logs):
+def test_error_logging(preserve_logs):
     """Test that errors are logged correctly."""
     with patch.dict(os.environ, {"CLAUDE_API_KEY": "test-key"}):
         with patch("anthropic.Client") as mock_client_class:
@@ -101,12 +110,34 @@ def test_error_logging(cleanup_logs):
             
             # Verify error was logged
             log_files = list(Path("logs").glob("prompt_log_*.jsonl"))
-            assert len(log_files) == 1
+            latest_log = max(log_files, key=lambda f: f.stat().st_mtime)
             
-            log_content = log_files[0].read_text().splitlines()
+            log_content = latest_log.read_text().splitlines()
             error_entries = [
                 line for line in log_content 
                 if json.loads(line).get("error", "").startswith("Error sending message")
             ]
             assert len(error_entries) == 1
-            assert "Test error" in error_entries[0] 
+            assert "Test error" in error_entries[0]
+
+def test_logs_preserved():
+    """Test that log files are preserved between test runs."""
+    log_dir = Path("logs")
+    
+    # Verify logs directory exists and contains .gitkeep
+    assert log_dir.exists()
+    assert log_dir.is_dir()
+    assert (log_dir / ".gitkeep").exists()
+    
+    # Verify log files exist and have content
+    log_files = list(log_dir.glob("prompt_log_*.jsonl"))
+    assert len(log_files) > 0  # Log files should exist
+    
+    for log_file in log_files:
+        assert log_file.stat().st_size > 0  # Files should have content
+        content = log_file.read_text()
+        assert content  # Content should be readable
+        # Verify it's valid JSON lines
+        for line in content.splitlines():
+            entry = json.loads(line)
+            assert "timestamp" in entry  # Each entry should have required fields 
