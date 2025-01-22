@@ -26,9 +26,9 @@ class AnthropicClient:
             if not api_key:
                 raise ValueError("No API key provided. Set CLAUDE_API_KEY environment variable or pass api_key to constructor.")
 
-        # Initialize client
-        self.client = anthropic.Client(api_key=api_key)
-        self.model = "claude-3-sonnet-20240229"
+        # Initialize client with latest SDK
+        self.client = anthropic.Anthropic(api_key=api_key)
+        self.model = "claude-2.1"  # Use model compatible with SDK v0.7.7
         self.conversation_history = []
 
         # Set up logging
@@ -70,12 +70,13 @@ class AnthropicClient:
         """
         self.logger.info(json.dumps(data))
     
-    def send_message(self, prompt: str, tools_used: List[Dict] = None) -> str:
+    def send_message(self, prompt: str, tools_used: List[Dict] = None, tool_responses: List[str] = None) -> str:
         """Send a message to the Claude API and log the interaction.
         
         Args:
             prompt: The message to send
             tools_used: List of tools used in processing this message, each with name and args
+            tool_responses: List of responses from tools used
         
         Returns:
             The response from Claude
@@ -84,29 +85,68 @@ class AnthropicClient:
             RuntimeError: If there is an error sending the message
         """
         try:
-            response = self.client.messages.create(
+            # Format tool usage history (limit to last 3 tools)
+            tool_history = ""
+            if tools_used:
+                tool_history = "\nRecent tools used:\n"
+                for tool in tools_used[-3:]:
+                    tool_history += f"- {tool['name']}\n"
+            
+            # Format tool responses (limit to last response)
+            response_history = ""
+            if tool_responses:
+                response_history = "\nLast tool response:\n" + tool_responses[-1]
+            
+            # Create system prompt that enables tool usage
+            system_prompt = f"""You are a powerful agentic AI coding assistant with access to filesystem tools. You have direct access to these tools and MUST use them to explore and analyze code repositories. The tools are already set up and ready to use - you just need to call them.
+
+Available tools that you can and should use RIGHT NOW:
+- list_dir: Lists contents of a directory
+- read_file: Reads contents of a file  
+- grep_search: Searches for patterns in files
+- file_search: Searches for files by name
+- codebase_search: Semantic search across the codebase
+
+You MUST use these tools to gather information. Do not say you don't have access - you do! Start by using list_dir(".") to see what's available.
+{tool_history}
+{response_history}"""
+            
+            # Format conversation history (limit to last 3 messages)
+            history = ""
+            for msg in self.conversation_history[-6:]:
+                if msg["role"] == "user":
+                    history += f"\n\nHuman: {msg['content']}"
+                else:
+                    history += f"\n\nAssistant: {msg['content']}"
+            
+            # Create message using SDK v0.7.7 format
+            response = self.client.completions.create(
                 model=self.model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}]
+                prompt=f"{system_prompt}\n\n{history}\n\nHuman: {prompt}\n\nAssistant:",
+                max_tokens_to_sample=1024,
+                temperature=0
             )
-            response_text = response.content[0].text
+            response_text = response.completion
             
             # Add message to conversation history
-            self.conversation_history.append({
-                "role": "user",
-                "content": prompt
-            })
-            self.conversation_history.append({
-                "role": "assistant", 
-                "content": response_text
-            })
+            self.conversation_history.extend([
+                {
+                    "role": "user",
+                    "content": prompt
+                },
+                {
+                    "role": "assistant", 
+                    "content": response_text
+                }
+            ])
             
             # Log the interaction
             self.log_interaction({
                 "timestamp": datetime.now().isoformat(),
                 "prompt": prompt,
                 "response_summary": response_text,
-                "tools_used": tools_used or []
+                "tools_used": tools_used or [],
+                "tool_responses": tool_responses or []
             })
             
             return response_text
