@@ -21,7 +21,7 @@ A Python-based CLI tool that integrates with Anthropic's Claude 3 API to provide
 
 2. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/anthropic-cli-tools.git
+   git clone https://github.com/alexander-morris/tool-usage.git
    cd anthropic-cli-tools
    ```
 

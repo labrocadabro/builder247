@@ -24,17 +24,20 @@ class AnthropicClient:
         if not api_key:
             api_key = os.getenv("CLAUDE_API_KEY")
             if not api_key:
-                raise ValueError("No API key provided. Set CLAUDE_API_KEY environment variable or pass api_key to constructor.")
+                raise ValueError("Failed to initialize Anthropic client: API key is required")
 
         # Initialize client with latest SDK
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = "claude-3-sonnet-20240229"  # Latest Claude 3 model
+        try:
+            self.client = anthropic.Client(api_key=api_key)
+        except Exception as e:
+            raise ValueError(f"Failed to initialize Anthropic client: {str(e)}")
+
+        # Set model and initialize conversation history
+        self.model = "claude-3-sonnet-20240229"
         self.conversation_history = []
 
         # Set up logging
         self.setup_logging()
-
-        # Log initialization
         self.log_interaction({
             "timestamp": datetime.now().isoformat(),
             "prompt": "INIT",
@@ -48,9 +51,7 @@ class AnthropicClient:
         log_dir.mkdir(exist_ok=True)
         
         # Create a unique log file for this session
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Add microseconds to ensure uniqueness
-        timestamp = f"{timestamp}_{int(time.time() * 1000000) % 1000000}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         log_file = log_dir / f"prompt_log_{timestamp}.jsonl"
         
         # Configure logger
@@ -70,11 +71,12 @@ class AnthropicClient:
         """
         self.logger.info(json.dumps(data))
     
-    def send_message(self, prompt: str, tools_used: List[Dict] = None, tool_responses: List[str] = None) -> str:
+    def send_message(self, prompt: str, system: str = None, tools_used: List[Dict] = None, tool_responses: List[str] = None) -> str:
         """Send a message to the Claude API and log the interaction.
         
         Args:
             prompt: The message to send
+            system: Optional system prompt
             tools_used: List of tools used in processing this message, each with name and args
             tool_responses: List of responses from tools used
         
@@ -98,35 +100,33 @@ class AnthropicClient:
                 response_history = "\nLast tool response:\n" + tool_responses[-1]
             
             # Create system prompt that enables tool usage
-            system_prompt = f"""You are a powerful agentic AI coding assistant with access to filesystem tools. You have direct access to these tools and MUST use them to explore and analyze code repositories. The tools are already set up and ready to use - you just need to call them.
+            default_system = """You are a powerful agentic AI coding assistant with access to filesystem tools. You have direct access to these tools and MUST use them to explore and analyze code repositories. The tools are already set up and ready to use - you just need to call them.
 
 Available tools that you can and should use RIGHT NOW:
 - list_dir: Lists contents of a directory
-- read_file: Reads contents of a file  
+- read_file: Reads contents of a file
 - grep_search: Searches for patterns in files
 - file_search: Searches for files by name
 - codebase_search: Semantic search across the codebase
 
-You MUST use these tools to gather information. Do not say you don't have access - you do! Start by using list_dir(".") to see what's available.
-{tool_history}
-{response_history}"""
+You MUST use these tools to gather information. Do not say you don't have access - you do! Start by using list_dir(".") to see what's available."""
+
+            system_prompt = system if system else default_system
+            if tool_history or response_history:
+                system_prompt = f"{system_prompt.rstrip()}{tool_history}{response_history}"
             
-            # Format conversation history (limit to last 3 messages)
-            history = ""
-            for msg in self.conversation_history[-6:]:
-                if msg["role"] == "user":
-                    history += f"\n\nHuman: {msg['content']}"
-                else:
-                    history += f"\n\nAssistant: {msg['content']}"
-            
-            # Create message using SDK v0.7.7 format
-            response = self.client.completions.create(
+            # Create message using messages API format
+            response = self.client.messages.create(
                 model=self.model,
-                prompt=f"{system_prompt}\n\n{history}\n\nHuman: {prompt}\n\nAssistant:",
-                max_tokens_to_sample=1024,
+                system=system_prompt,
+                messages=[
+                    *[{"role": msg["role"], "content": msg["content"]} for msg in self.conversation_history[-6:]],
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1024,
                 temperature=0
             )
-            response_text = response.completion
+            response_text = response.content[0].text
             
             # Add message to conversation history
             self.conversation_history.extend([
@@ -164,4 +164,8 @@ You MUST use these tools to gather information. Do not say you don't have access
     def clear_history(self):
         """Clear the conversation history."""
         self.conversation_history = []
-        self.log_interaction("CLEAR", "Conversation history cleared", [{"tool": "clear_history"}]) 
+        self.log_interaction({
+            "timestamp": datetime.now().isoformat(),
+            "event": "clear_history",
+            "message": "Conversation history cleared"
+        }) 
