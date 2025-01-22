@@ -29,6 +29,50 @@
 3. Add log file patterns to .gitignore
 4. Write tests for logging functionality
 
+## Current Sprint: Log Rotation [TODO-18]
+
+### Acceptance Criteria
+- Implement size-based log rotation
+  - Maximum file size configurable (default 10MB)
+  - Rotate files when size limit reached
+  - Keep last N files (configurable, default 5)
+- Implement age-based log rotation
+  - Maximum age configurable (default 7 days)
+  - Rotate files older than limit
+  - Maintain timestamp-based naming
+- Add rotation configuration options
+  - Size threshold
+  - Age threshold
+  - Number of backups
+  - Rotation schedule
+- Ensure thread safety during rotation
+
+### Test Cases
+1. **Size-based Rotation**
+   - Verify rotation at size limit
+   - Check backup file naming
+   - Test file cleanup
+2. **Age-based Rotation**
+   - Verify rotation at age limit
+   - Test with different timeframes
+   - Check cleanup of old files
+3. **Configuration**
+   - Test different size limits
+   - Test different age limits
+   - Test backup count limits
+4. **Thread Safety**
+   - Test concurrent writing
+   - Verify no data loss during rotation
+   - Check file integrity
+
+### Implementation Steps
+1. Add rotation configuration class
+2. Implement size-based rotation
+3. Implement age-based rotation
+4. Add thread safety mechanisms
+5. Write comprehensive tests
+6. Update documentation
+
 ## Completed
 - [x] [TODO-15] Agent Integration Testing
   - Added verbose test infrastructure
@@ -75,7 +119,6 @@
 - [ ] [TODO-11] Add conversation backup
 - [ ] [TODO-12] Add conversation restore
 - [ ] [TODO-13] Add conversation search
-- [ ] [TODO-18] Add log rotation by size/age
 - [ ] [TODO-19] Add log analysis tools
 - [ ] [TODO-20] Add log compression for older files
 
