@@ -209,7 +209,7 @@ def test_error_logging(preserve_logs):
             
             # Create client and attempt to send message
             client = AnthropicClient()
-            with pytest.raises(RuntimeError):
+            with pytest.raises(Exception, match="Test error"):
                 client.send_message("Test prompt")
             
             # Verify error was logged
@@ -219,7 +219,7 @@ def test_error_logging(preserve_logs):
             log_content = latest_log.read_text().splitlines()
             error_entries = [
                 line for line in log_content 
-                if json.loads(line).get("error", "").startswith("Error sending message")
+                if json.loads(line).get("response_summary", "").startswith("Error: Test error")
             ]
             assert len(error_entries) == 1
             assert "Test error" in error_entries[0]
