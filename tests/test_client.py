@@ -81,13 +81,13 @@ def test_load_conversation(client):
     
     # Clear and reload
     client.conversation.clear()
-    client.load_conversation(conv_id, max_window_messages=1)
+    client.load_conversation(conv_id)
     
     # Verify window state
     messages = client.conversation.get_messages()
-    assert len(messages) == 1
-    assert messages[0]["content"] == "How are you?"
-
+    assert len(messages) == 4
+    assert messages[0]["content"] == "Hello"
+    assert messages[2]["content"] == "How are you?"
 def test_send_message(client):
     """Test sending messages."""
     # Send messages

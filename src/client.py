@@ -340,8 +340,7 @@ class AnthropicClient:
         
         # Load recent messages into window
         messages = self.history_manager.get_messages(
-            conversation_id,
-            max_tokens=self.conversation.max_tokens
+            conversation_id
         )
         
         # Add messages to window (will automatically handle limits)
@@ -393,7 +392,10 @@ class AnthropicClient:
             self.conversation_history.append({
                 "role": "assistant",
                 "content": response_text
-            })
+            })       #self, conversation_id: str, role: str, content: str, metadata: Dict = None
+            if (self.current_conversation_id):
+                self.history_manager.add_message(self.current_conversation_id, "user", prompt)
+                self.history_manager.add_message(self.current_conversation_id, "assistant", response_text)
             
             # Reset retry count on success
             self.retry_count = 0
