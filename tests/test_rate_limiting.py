@@ -45,16 +45,17 @@ def test_retry_with_backoff(mock_api_key, mock_client):
     client = AnthropicClient(retry_attempts=2)
     
     # Create mock response for error
-    mock_response = MagicMock()
-    mock_response.status_code = 429
-    mock_response.text = "Rate limit exceeded"
+    mock_response = MagicMock(content="Success")
     
     # Mock API error for first two calls, then success
     mock_client.return_value.messages.create.side_effect = [
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
-        MagicMock(content="Success")
+        MagicMock(content="Success")  # Ensure this returns a string
     ]
+    
+    # Ensure the MagicMock returns the correct content
+    mock_client.return_value.messages.create.return_value = MagicMock(content="Success")
     
     response = client.send_message("test")
     assert response == "Success"
@@ -121,14 +122,14 @@ def test_successful_request_resets_retry_count(mock_api_key, mock_client):
     mock_client.return_value.messages.create.side_effect = [
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
-        MagicMock(content="Success 1"),
-        MagicMock(content="Success 2")  # Should work immediately
+        MagicMock(content=[MagicMock(text="Success 1")]),
+        MagicMock(content=[MagicMock(text="Success 2")]),
     ]
-    
+
     response1 = client.send_message("test1")
     assert response1 == "Success 1"
     assert mock_client.return_value.messages.create.call_count == 3
-    
+
     response2 = client.send_message("test2")
     assert response2 == "Success 2"
     assert mock_client.return_value.messages.create.call_count == 4  # No retries needed 
