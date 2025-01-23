@@ -51,7 +51,7 @@ def test_retry_with_backoff(mock_api_key, mock_client):
     mock_client.return_value.messages.create.side_effect = [
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
         APIStatusError(message="Rate limit exceeded", body={"error": {"message": "Rate limit exceeded"}}, response=mock_response),
-        MagicMock(content="Success")  # Ensure this returns a string
+        MagicMock(content=[MagicMock(text="Success")]), # Ensure this returns a string
     ]
     
     # Ensure the MagicMock returns the correct content
