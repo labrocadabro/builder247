@@ -412,6 +412,23 @@ class AnthropicClient:
                         self.current_conversation_id, "system", system
                     )
 
+            # Add tool results to conversation if any
+            for tool in tools_used:
+                tool_result = self.execute_tool(tool["tool"], **tool.get("args", {}))
+                tool_message = {
+                    "role": "tool",
+                    "tool_name": tool["tool"],
+                    "tool_response": tool_result,
+                }
+                messages.append(tool_message)
+                self.conversation.add_message(
+                    {"role": "tool", "content": json.dumps(tool_message)}
+                )
+                if self.current_conversation_id:
+                    self.history_manager.add_message(
+                        self.current_conversation_id, "tool", json.dumps(tool_message)
+                    )
+
             messages.append({"role": "user", "content": prompt})
             self.conversation.add_message({"role": "user", "content": prompt})
 
@@ -440,15 +457,24 @@ class AnthropicClient:
                 {"role": "assistant", "content": response_text}
             )
 
-            # Update conversation history with tools_used
+            # Update conversation history with tools_used and their results
+            tool_results = []
+            for tool in tools_used:
+                tool_result = {
+                    "tool": tool["tool"],
+                    "args": tool.get("args", {}),
+                    "result": self.execute_tool(tool["tool"], **tool.get("args", {})),
+                }
+                tool_results.append(tool_result)
+
             self.conversation_history.append(
-                {"role": "user", "content": prompt, "tools_used": tools_used}
+                {"role": "user", "content": prompt, "tools_used": tool_results}
             )
             self.conversation_history.append(
                 {
                     "role": "assistant",
                     "content": response_text,
-                    "tools_used": tools_used,
+                    "tools_used": tool_results,
                 }
             )
 
@@ -468,7 +494,7 @@ class AnthropicClient:
                 prompt,
                 response_text,  # Use response text as summary
                 response_text,
-                tools_used or [{"tool": "send_message"}],
+                tool_results or [{"tool": "send_message"}],
             )
 
             return response_text
