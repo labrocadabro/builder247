@@ -2,19 +2,23 @@
 Tool implementations for Anthropic CLI integration.
 """
 
+from typing import Dict, List
+
 from .implementations import ToolImplementations
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
+from .interfaces import ToolResponse, ToolResponseStatus
 
 __all__ = [
     "TOOL_DEFINITIONS",
     "ToolImplementations",
     "CommandExecutor",
     "FileSystemTools",
+    "ToolResponse",
+    "ToolResponseStatus",
 ]
 
-TOOL_DEFINITIONS = [
-    # Command execution tools
+TOOL_DEFINITIONS: List[Dict] = [
     {
         "name": "execute_command",
         "description": "Execute a shell command and capture its output",
@@ -22,19 +26,29 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Command to execute"},
-                "capture_output": {
-                    "type": "boolean",
-                    "description": "Whether to capture stdout/stderr",
-                    "default": True,
-                },
-                "shell": {
-                    "type": "boolean",
-                    "description": "Whether to execute through shell",
-                    "default": True,
+                "working_dir": {
+                    "type": "string",
+                    "description": "Working directory for command execution",
+                    "optional": True,
                 },
                 "timeout": {
                     "type": "integer",
                     "description": "Command timeout in seconds",
+                    "optional": True,
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables",
+                    "optional": True,
+                },
+                "shell": {
+                    "type": "boolean",
+                    "description": "Whether to execute through shell",
+                    "optional": True,
+                },
+                "capture_output": {
+                    "type": "boolean",
+                    "description": "Whether to capture stdout/stderr",
                     "optional": True,
                 },
             },
@@ -56,10 +70,9 @@ TOOL_DEFINITIONS = [
             "required": ["commands"],
         },
     },
-    # Filesystem tools
     {
         "name": "read_file",
-        "description": "Read contents of a file",
+        "description": "Read the contents of a file",
         "parameters": {
             "type": "object",
             "properties": {
@@ -70,7 +83,17 @@ TOOL_DEFINITIONS = [
                 "encoding": {
                     "type": "string",
                     "description": "File encoding",
-                    "default": "utf-8",
+                    "optional": True,
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Offset in bytes",
+                    "optional": True,
+                },
+                "length": {
+                    "type": "integer",
+                    "description": "Number of bytes to read",
+                    "optional": True,
                 },
             },
             "required": ["file_path"],
@@ -84,21 +107,18 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to write the file to",
+                    "description": "Path to the file to write",
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write to the file",
-                },
+                "content": {"type": "string", "description": "Content to write"},
                 "encoding": {
                     "type": "string",
                     "description": "File encoding",
-                    "default": "utf-8",
+                    "optional": True,
                 },
                 "create_dirs": {
                     "type": "boolean",
-                    "description": "Whether to create parent directories",
-                    "default": True,
+                    "description": "Create parent directories if needed",
+                    "optional": True,
                 },
             },
             "required": ["file_path", "content"],
@@ -113,13 +133,13 @@ TOOL_DEFINITIONS = [
                 "directory": {"type": "string", "description": "Directory to list"},
                 "pattern": {
                     "type": "string",
-                    "description": "Optional glob pattern to filter results",
+                    "description": "Glob pattern to filter files",
                     "optional": True,
                 },
                 "recursive": {
                     "type": "boolean",
-                    "description": "Whether to list recursively",
-                    "default": False,
+                    "description": "List subdirectories recursively",
+                    "optional": True,
                 },
             },
             "required": ["directory"],

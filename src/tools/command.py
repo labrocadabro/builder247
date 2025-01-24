@@ -1,134 +1,199 @@
 """
-Command line execution tools for Anthropic CLI integration.
+Command execution with security checks.
 """
 
-import os
+from typing import List, Dict, Any
 import subprocess
-from typing import Optional, Dict, Union, List
-from dataclasses import dataclass
+import os
 
-
-@dataclass
-class CommandResult:
-    """Result of a command execution."""
-
-    exit_code: int
-    stdout: str
-    stderr: str
-    command: str
+from .interfaces import ToolResponse, ToolResponseStatus
+from .security import SecurityContext, SecurityError
 
 
 class CommandExecutor:
-    """Execute shell commands and capture their output."""
+    """Execute system commands securely."""
 
-    def __init__(self, working_dir: Optional[str] = None):
-        """
-        Initialize command executor.
+    SHELL_ESCAPE_PATTERNS = [
+        r"\$\(",  # Command substitution $(...)
+        r"`",  # Backtick command substitution
+        r"\$\{[^}]*[^a-zA-Z0-9_}]",  # Variable substitution with braces containing special chars
+        r"\\[^\\]",  # Shell escape sequences
+        r"\$\[\[",  # Arithmetic expansion
+        r"\$\(\(",  # Arithmetic expansion alternative
+    ]
 
-        Args:
-            working_dir: Working directory for command execution
-        """
-        self.working_dir = working_dir or os.getcwd()
-        self._env = os.environ.copy()
+    INJECTION_PATTERNS = [
+        r"&&",  # AND operator
+        r"\|\|",  # OR operator
+        r";",  # Command separator
+    ]
 
-    def execute(
-        self,
-        command: Union[str, List[str]],
-        capture_output: bool = True,
-        shell: bool = True,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-        check: bool = False,
-    ) -> CommandResult:
-        """
-        Execute a shell command.
+    def __init__(self, security_context: SecurityContext):
+        """Initialize command executor with clean environment.
 
         Args:
-            command: Command to execute (string or list of arguments)
-            capture_output: Whether to capture stdout/stderr
-            shell: Whether to execute through shell
-            env: Additional environment variables
-            timeout: Command timeout in seconds
-            check: Whether to raise on non-zero exit code
+            security_context: Security context for command execution
+        """
+        self.security_context = security_context
+        self.env = os.environ.copy()
+        self.working_dir = None
+
+    def validate_params(self, params: Dict[str, Any]) -> None:
+        """Validate parameters before execution."""
+        if "command" in params and not isinstance(params["command"], (str, list)):
+            raise TypeError("command must be a string or list")
+        if "timeout" in params and not isinstance(params["timeout"], (int, type(None))):
+            raise TypeError("timeout must be an integer or None")
+
+    def check_command_security(self, command: str) -> None:
+        """Check if command execution is allowed."""
+        if not self.security_context.check_command(command):
+            raise ValueError("Command contains restricted operations")
+
+    def execute(self, command: str, **kwargs) -> ToolResponse:
+        """Execute a command.
+
+        Args:
+            command: Command to execute
+            **kwargs: Additional arguments passed to subprocess.run
 
         Returns:
-            CommandResult containing exit code and output
+            Command execution response
 
         Raises:
-            subprocess.TimeoutExpired: If command times out
-            subprocess.CalledProcessError: If check=True and command fails
-            OSError: If command execution fails
+            SecurityError: If command is not allowed
         """
-        # Validate command type first
-        if not isinstance(command, (str, list)):
-            raise TypeError(
-                f"Command must be string or list, not {type(command).__name__}"
-            )
-
         try:
-            # Prepare environment
-            cmd_env = self._env.copy()
-            if env:
-                cmd_env.update(env)
+            # Check command security
+            self.security_context.check_command_security(command, kwargs.get("env"))
 
-            # Convert list command to string if using shell
-            if isinstance(command, list) and shell:
-                command = " ".join(command)
+            # Set defaults
+            kwargs.setdefault("capture_output", True)
+            kwargs.setdefault("text", True)
+            kwargs.setdefault("check", False)
 
-            # Execute command
-            result = subprocess.run(
-                command,
-                shell=shell,
-                cwd=self.working_dir,
-                env=cmd_env,
-                capture_output=capture_output,
-                text=True,
-                timeout=timeout,
-                check=check,
+            # Run command
+            result = subprocess.run(command, shell=True, **kwargs)
+
+            # Get output
+            output = result.stdout if result.returncode == 0 else result.stderr
+            output = self.security_context.sanitize_output(output or "")
+
+            # Return response
+            return ToolResponse(
+                status=(
+                    ToolResponseStatus.SUCCESS
+                    if result.returncode == 0
+                    else ToolResponseStatus.ERROR
+                ),
+                data=output,
+                error=(
+                    None
+                    if result.returncode == 0
+                    else f"Command failed with exit code {result.returncode}"
+                ),
+                metadata={"returncode": result.returncode},
             )
 
-            return CommandResult(
-                exit_code=result.returncode,
-                stdout=result.stdout if capture_output else "",
-                stderr=result.stderr if capture_output else "",
-                command=command if isinstance(command, str) else " ".join(command),
-            )
-
+        except SecurityError as e:
+            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
         except subprocess.TimeoutExpired as e:
-            raise subprocess.TimeoutExpired(
-                cmd=e.cmd, timeout=e.timeout, output=e.output, stderr=e.stderr
-            )
-        except subprocess.CalledProcessError as e:
-            if check:
-                raise
-            return CommandResult(
-                exit_code=e.returncode,
-                stdout=e.output or "",
-                stderr=e.stderr or "",
-                command=command if isinstance(command, str) else " ".join(command),
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Command timed out after {e.timeout} seconds",
             )
         except Exception as e:
-            raise OSError(f"Error executing command: {str(e)}")
+            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
 
-    def execute_piped(
-        self, commands: List[Union[str, List[str]]], **kwargs
-    ) -> CommandResult:
-        """
-        Execute a pipeline of commands.
+    def execute_piped(self, commands: List[List[str]], **kwargs) -> ToolResponse:
+        """Execute piped commands.
 
         Args:
-            commands: List of commands to pipe together
-            **kwargs: Additional arguments passed to execute()
+            commands: List of command argument lists to pipe together
+            **kwargs: Additional arguments passed to subprocess.Popen
 
         Returns:
-            CommandResult for the entire pipeline
+            Command execution response
+
+        Raises:
+            SecurityError: If any command is not allowed
         """
-        if not commands:
-            raise ValueError("No commands provided")
+        try:
+            # Check security for each command
+            for cmd in commands:
+                cmd_str = " ".join(cmd)
+                self.security_context.check_command_security(cmd_str, kwargs.get("env"))
 
-        # Create pipeline using shell
-        pipeline = " | ".join(
-            cmd if isinstance(cmd, str) else " ".join(cmd) for cmd in commands
-        )
+            # Set up pipeline
+            processes = []
+            for i, cmd in enumerate(commands):
+                # Set up stdin/stdout
+                stdin = processes[-1].stdout if processes else None
+                stdout = subprocess.PIPE if i < len(commands) - 1 else subprocess.PIPE
 
-        return self.execute(pipeline, **kwargs)
+                # Start process
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    **kwargs,
+                )
+                processes.append(process)
+
+                # Close previous stdout
+                if stdin:
+                    processes[-2].stdout.close()
+
+            # Wait for final process and get output
+            output, error = processes[-1].communicate()
+            returncode = processes[-1].returncode
+
+            # Clean up other processes
+            for p in processes[:-1]:
+                p.wait()
+
+            # Get output
+            output = self.security_context.sanitize_output(
+                output if returncode == 0 else error or ""
+            )
+
+            # Return response
+            return ToolResponse(
+                status=(
+                    ToolResponseStatus.SUCCESS
+                    if returncode == 0
+                    else ToolResponseStatus.ERROR
+                ),
+                data=output,
+                error=(
+                    None
+                    if returncode == 0
+                    else f"Pipeline failed with exit code {returncode}"
+                ),
+                metadata={"returncode": returncode},
+            )
+
+        except SecurityError as e:
+            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
+        except Exception as e:
+            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
+
+    def _get_clean_env(self) -> Dict[str, str]:
+        """
+        Get a clean environment dictionary with sensitive variables filtered out.
+
+        Returns:
+            Dict containing filtered environment variables
+        """
+        clean_env = {}
+        base_env = os.environ.copy()
+        # Filter out sensitive variables
+        for key, value in base_env.items():
+            if not any(
+                pattern in key.upper()
+                for pattern in ["SECRET", "KEY", "TOKEN", "PASSWORD", "CREDENTIAL"]
+            ):
+                clean_env[key] = value
+        return clean_env

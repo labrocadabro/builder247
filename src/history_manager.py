@@ -168,7 +168,18 @@ class ConversationHistoryManager:
 
         Returns:
             List of message dictionaries
+
+        Raises:
+            ValueError: If conversation_id does not exist
         """
+        # First check if conversation exists
+        with self._get_connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if not exists:
+                raise ValueError(f"Conversation {conversation_id} not found")
+
         query = "SELECT * FROM messages WHERE conversation_id = ?"
         params = [conversation_id]
 
@@ -372,3 +383,46 @@ class ConversationHistoryManager:
         """
         with self.lock:
             shutil.copy2(backup_file, self.db_path)
+
+    def update_conversation_metadata(
+        self,
+        conversation_id: str,
+        metadata: Optional[Dict] = None,
+        title: Optional[str] = None,
+    ) -> None:
+        """Update conversation metadata and/or title.
+
+        Args:
+            conversation_id: ID of conversation to update
+            metadata: Optional new metadata dictionary to merge with existing
+            title: Optional new title for the conversation
+
+        Raises:
+            ValueError: If conversation_id does not exist
+        """
+        with self._get_connection() as conn:
+            # Get existing metadata
+            row = conn.execute(
+                "SELECT metadata, title FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+
+            if not row:
+                raise ValueError(f"Conversation {conversation_id} not found")
+
+            # Update metadata if provided
+            if metadata:
+                existing = json.loads(row[0])
+                existing.update(metadata)
+                metadata_json = json.dumps(existing)
+            else:
+                metadata_json = row[0]
+
+            # Update title if provided
+            new_title = title if title is not None else row[1]
+
+            # Update the conversation
+            conn.execute(
+                "UPDATE conversations SET metadata = ?, title = ?, last_updated = ? WHERE id = ?",
+                (metadata_json, new_title, datetime.now(), conversation_id),
+            )

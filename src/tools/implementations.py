@@ -1,104 +1,143 @@
-"""
-Tool implementations that connect definitions to the underlying code.
-"""
+"""Tool implementations for Anthropic CLI."""
 
-from typing import Any, Dict, List
+from typing import Dict, Any, Optional, List
 from pathlib import Path
+
+from .interfaces import ToolResponse
+from .security import SecurityContext
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
 
 
 class ToolImplementations:
-    """Implementations for the defined tools."""
+    """Tool implementations for Anthropic CLI."""
 
-    def __init__(self):
-        """Initialize tool implementations."""
-        self.command_executor = CommandExecutor()
-        self.fs_tools = FileSystemTools()
-
-        # Map tool names to their implementation methods
-        self.implementations = {
-            "execute_command": self.execute_command,
-            "execute_piped": self.execute_piped,
-            "read_file": self.read_file,
-            "write_file": self.write_file,
-            "list_directory": self.list_directory,
-        }
-
-    def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> Any:
-        """
-        Execute a tool by name with given parameters.
+    def __init__(
+        self,
+        workspace_dir: Optional[Path] = None,
+        allowed_paths: Optional[List[Path]] = None,
+        allowed_env_vars: Optional[List[str]] = None,
+        restricted_commands: Optional[List[str]] = None,
+    ):
+        """Initialize tool implementations.
 
         Args:
-            tool_name: Name of the tool to execute
-            parameters: Tool parameters
+            workspace_dir: Base directory for operations
+            allowed_paths: List of allowed paths outside workspace
+            allowed_env_vars: List of allowed environment variables
+            restricted_commands: List of restricted commands
+        """
+        # Create security context
+        self.security_context = SecurityContext(
+            workspace_dir=workspace_dir,
+            allowed_paths=allowed_paths,
+            allowed_env_vars=allowed_env_vars,
+            restricted_commands=restricted_commands,
+        )
+
+        # Initialize tools
+        self.cmd_executor = CommandExecutor(self.security_context)
+        self.fs_tools = FileSystemTools(self.security_context)
+
+        # Initialize tool registry
+        self.registered_tools: Dict[str, Any] = {}
+        self._register_default_tools()
+
+    def _register_default_tools(self) -> None:
+        """Register default tools."""
+        self.register_tool("execute_command", self.execute_command)
+        self.register_tool("execute_piped", self.execute_piped)
+        self.register_tool("read_file", self.read_file)
+        self.register_tool("write_file", self.write_file)
+        self.register_tool("list_directory", self.list_directory)
+
+    def register_tool(self, name: str, tool_func: Any) -> None:
+        """Register a tool.
+
+        Args:
+            name: Tool name
+            tool_func: Tool implementation function
+        """
+        self.registered_tools[name] = tool_func
+
+    def execute_tool(
+        self, name: str, params: Optional[Dict[str, Any]] = None
+    ) -> ToolResponse:
+        """Execute a registered tool.
+
+        Args:
+            name: Tool name
+            params: Tool parameters
 
         Returns:
-            Tool execution result
+            Tool execution response
 
         Raises:
-            ValueError: If tool is not found
+            ValueError: If tool not found
         """
-        if tool_name not in self.implementations:
-            raise ValueError(f"Tool {tool_name} not found")
+        if name not in self.registered_tools:
+            raise ValueError(f"Unknown tool: {name}")
 
-        return self.implementations[tool_name](**parameters)
+        tool_func = self.registered_tools[name]
+        return tool_func(**(params or {}))
 
-    def execute_command(
-        self,
-        command: str,
-        capture_output: bool = True,
-        shell: bool = True,
-        timeout: int = None,
-    ) -> Dict[str, Any]:
-        """Execute a shell command."""
-        result = self.command_executor.execute(
-            command=command, capture_output=capture_output, shell=shell, timeout=timeout
-        )
+    def execute_command(self, command: str, **kwargs) -> ToolResponse:
+        """Execute a command.
 
-        return {
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "command": result.command,
-        }
+        Args:
+            command: Command to execute
+            **kwargs: Additional arguments
 
-    def execute_piped(self, commands: List[str]) -> Dict[str, Any]:
-        """Execute piped commands."""
-        result = self.command_executor.execute_piped(commands)
+        Returns:
+            Command execution response
+        """
+        return self.cmd_executor.execute(command, **kwargs)
 
-        return {
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "command": result.command,
-        }
+    def execute_piped(self, commands: List[List[str]], **kwargs) -> ToolResponse:
+        """Execute piped commands.
 
-    def read_file(self, file_path: str, encoding: str = "utf-8") -> str:
-        """Read a file."""
-        return self.fs_tools.read_file(file_path=Path(file_path), encoding=encoding)
+        Args:
+            commands: List of command argument lists
+            **kwargs: Additional arguments
 
-    def write_file(
-        self,
-        file_path: str,
-        content: str,
-        encoding: str = "utf-8",
-        create_dirs: bool = True,
-    ) -> None:
-        """Write to a file."""
-        self.fs_tools.write_file(
-            file_path=Path(file_path),
-            content=content,
-            encoding=encoding,
-            create_dirs=create_dirs,
-        )
-        return {"success": True}
+        Returns:
+            Command execution response
+        """
+        return self.cmd_executor.execute_piped(commands, **kwargs)
 
-    def list_directory(
-        self, directory: str, pattern: str = None, recursive: bool = False
-    ) -> List[str]:
-        """List directory contents."""
-        results = self.fs_tools.list_directory(
-            directory=Path(directory), pattern=pattern, recursive=recursive
-        )
-        return [str(path) for path in results]
+    def read_file(self, file_path: str, **kwargs) -> ToolResponse:
+        """Read a file.
+
+        Args:
+            file_path: Path to file
+            **kwargs: Additional arguments
+
+        Returns:
+            File contents
+        """
+        return self.fs_tools.read_file(file_path, **kwargs)
+
+    def write_file(self, file_path: str, content: str, **kwargs) -> ToolResponse:
+        """Write to a file.
+
+        Args:
+            file_path: Path to file
+            content: Content to write
+            **kwargs: Additional arguments
+
+        Returns:
+            Write operation response
+        """
+        return self.fs_tools.write_file(file_path, content, **kwargs)
+
+    def list_directory(self, directory: str, **kwargs) -> ToolResponse:
+        """List directory contents.
+
+        Args:
+            directory: Directory path
+            **kwargs: Additional arguments
+
+        Returns:
+            Directory listing
+        """
+        return self.fs_tools.list_directory(directory, **kwargs)
