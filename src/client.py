@@ -2,7 +2,7 @@
 Anthropic API client wrapper with tool integration support.
 """
 
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Any
 import os
 import json
 import logging
@@ -16,6 +16,7 @@ from collections import deque
 from threading import Lock
 import tiktoken
 from .history_manager import ConversationHistoryManager
+from .tools import TOOL_DEFINITIONS, ToolImplementations
 
 
 class MockJSONEncoder(json.JSONEncoder):
@@ -92,6 +93,7 @@ class AnthropicClient:
         max_window_tokens: int = 100000,
         max_window_messages: int = 100,
         storage_dir: Union[str, Path] = "conversations",
+        tools: List[Dict] = None,
     ):
         """Initialize the client.
 
@@ -104,6 +106,7 @@ class AnthropicClient:
             max_window_tokens: Maximum tokens in conversation window.
             max_window_messages: Maximum messages in conversation window.
             storage_dir: Directory for storing conversation history.
+            tools: List of tool definitions in Claude's function calling format
         """
         # Get API key from environment if not provided
         if not api_key:
@@ -136,6 +139,15 @@ class AnthropicClient:
         self.retry_count = 0
         self.base_delay = 1  # Base delay in seconds
         self.max_backoff = max_backoff
+
+        # Initialize with merged tool definitions
+        default_tools = {tool["name"]: tool for tool in TOOL_DEFINITIONS}
+        if tools:
+            # Add custom tools to the defaults
+            custom_tools = {tool["name"]: tool for tool in tools}
+            default_tools.update(custom_tools)
+        self.available_tools = default_tools
+        self.tool_implementations = ToolImplementations()
 
         # Setup logging
         self.setup_logging()
@@ -353,6 +365,32 @@ class AnthropicClient:
         for msg in messages[-max_window_messages:] if max_window_messages else messages:
             self.conversation.add_message(msg)
 
+    def execute_tool(self, tool_name: str, **kwargs) -> Any:
+        """Execute a registered tool.
+
+        Args:
+            tool_name: Name of the tool to execute
+            **kwargs: Arguments to pass to the tool
+
+        Returns:
+            Tool execution result
+
+        Raises:
+            ValueError: If tool is not found
+        """
+        if tool_name not in self.available_tools:
+            raise ValueError(f"Tool {tool_name} not found")
+
+        # Log tool execution
+        self._log_interaction(
+            prompt=f"Executing tool: {tool_name}",
+            summary=f"Tool executed with args: {kwargs}",
+            tools_used=[{"tool": tool_name, "args": kwargs}],
+        )
+
+        # Execute the tool
+        return self.tool_implementations.execute_tool(tool_name, kwargs)
+
     def send_message(
         self, prompt: str, system: str = None, tools_used: List[Dict] = None
     ) -> str:
@@ -368,7 +406,6 @@ class AnthropicClient:
             messages = []
             if system:
                 messages.append({"role": "system", "content": system})
-                # Add system message to conversation window and history
                 self.conversation.add_message({"role": "system", "content": system})
                 if self.current_conversation_id:
                     self.history_manager.add_message(
@@ -376,12 +413,18 @@ class AnthropicClient:
                     )
 
             messages.append({"role": "user", "content": prompt})
-            # Add user message to conversation window
             self.conversation.add_message({"role": "user", "content": prompt})
 
-            # Send request to Claude
+            # Send request to Claude with tools if available
             response = self.client.messages.create(
-                model=self.model, max_tokens=100000, messages=messages, system=system
+                model=self.model,
+                messages=messages,
+                system=system,
+                tools=(
+                    list(self.available_tools.values())
+                    if self.available_tools
+                    else None
+                ),
             )
 
             # Extract response text
@@ -397,10 +440,16 @@ class AnthropicClient:
                 {"role": "assistant", "content": response_text}
             )
 
-            # Update conversation history
-            self.conversation_history.append({"role": "user", "content": prompt})
+            # Update conversation history with tools_used
             self.conversation_history.append(
-                {"role": "assistant", "content": response_text}
+                {"role": "user", "content": prompt, "tools_used": tools_used}
+            )
+            self.conversation_history.append(
+                {
+                    "role": "assistant",
+                    "content": response_text,
+                    "tools_used": tools_used,
+                }
             )
 
             if self.current_conversation_id:

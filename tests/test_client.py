@@ -6,6 +6,7 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock, Mock
 from src.client import AnthropicClient, ConversationWindow
+from src.tools import TOOL_DEFINITIONS
 import tempfile
 import shutil
 import anthropic
@@ -231,3 +232,168 @@ def test_missing_api_key():
             match="Failed to initialize Anthropic client: API key is required",
         ):
             AnthropicClient()
+
+
+def test_tool_integration(client):
+    """Test tool integration."""
+    # Define a test tool
+    test_tool = {
+        "name": "test_tool",
+        "description": "A test tool",
+        "parameters": {
+            "type": "object",
+            "properties": {"arg1": {"type": "string"}, "arg2": {"type": "integer"}},
+            "required": ["arg1"],
+        },
+    }
+
+    # Create client with test tool (should merge with default tools)
+    with patch.dict(os.environ, {"CLAUDE_API_KEY": "test-key"}):
+        client = AnthropicClient(tools=[test_tool])
+
+        # Verify test tool was added alongside default tools
+        assert "test_tool" in client.available_tools
+        assert client.available_tools["test_tool"] == test_tool
+
+        # Verify default tools are still available
+        assert "execute_command" in client.available_tools
+        assert "read_file" in client.available_tools
+
+        # Test tool execution
+        with pytest.raises(ValueError):
+            client.execute_tool("nonexistent_tool")
+
+        # Test sending message with tools
+        response = client.send_message("Test message")
+        assert response == "Test response"
+
+
+def test_command_tool_integration(client, tmp_path):
+    """Test command execution tool integration."""
+    # Create client with command tools
+    client = AnthropicClient(tools=TOOL_DEFINITIONS)
+
+    # Test basic command execution
+    result = client.execute_tool("execute_command", command="echo 'hello world'")
+    assert result["exit_code"] == 0
+    assert "hello world" in result["stdout"]
+    assert not result["stderr"]
+
+    # Test piped commands
+    result = client.execute_tool(
+        "execute_piped", commands=["echo 'hello'", "tr 'a-z' 'A-Z'"]
+    )
+    assert result["exit_code"] == 0
+    assert "HELLO" in result["stdout"]
+
+
+def test_filesystem_tool_integration(client, tmp_path):
+    """Test filesystem tool integration."""
+    # Create client with filesystem tools
+    client = AnthropicClient(tools=TOOL_DEFINITIONS)
+
+    # Test writing a file
+    test_file = tmp_path / "test.txt"
+    content = "Hello, world!"
+    result = client.execute_tool(
+        "write_file", file_path=str(test_file), content=content
+    )
+    assert result["success"]
+    assert test_file.exists()
+
+    # Test reading a file
+    read_content = client.execute_tool("read_file", file_path=str(test_file))
+    assert read_content == content
+
+    # Test listing directory
+    # First create some test files
+    (tmp_path / "file1.txt").write_text("test1")
+    (tmp_path / "file2.txt").write_text("test2")
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    (subdir / "file3.txt").write_text("test3")
+
+    # Test basic directory listing
+    results = client.execute_tool("list_directory", directory=str(tmp_path))
+    assert len(results) == 4  # test.txt, file1.txt, file2.txt, subdir
+    assert any("file1.txt" in path for path in results)
+
+    # Test recursive listing
+    results = client.execute_tool(
+        "list_directory", directory=str(tmp_path), recursive=True
+    )
+    assert len(results) == 5  # includes file in subdir
+    assert any("subdir/file3.txt" in path for path in results)
+
+    # Test pattern matching
+    results = client.execute_tool(
+        "list_directory", directory=str(tmp_path), pattern="*.txt"
+    )
+    assert len(results) == 3  # test.txt, file1.txt, file2.txt
+    assert all(".txt" in path for path in results)
+
+
+def test_tool_error_handling(client, tmp_path):
+    """Test error handling for tools."""
+    client = AnthropicClient(tools=TOOL_DEFINITIONS)
+
+    # Test nonexistent tool
+    with pytest.raises(ValueError, match="Tool nonexistent_tool not found"):
+        client.execute_tool("nonexistent_tool")
+
+    # Test nonexistent file
+    with pytest.raises(FileNotFoundError, match="Directory not found"):
+        client.execute_tool("read_file", file_path="/nonexistent/path")
+
+    # Test permission error
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("test content")
+    test_file.chmod(0o000)  # Remove all permissions
+
+    with pytest.raises(PermissionError, match=r"No read permission for file: .*"):
+        client.execute_tool("read_file", file_path=str(test_file))
+
+    # Cleanup
+    test_file.chmod(0o644)  # Restore permissions for cleanup
+
+    # Test invalid command
+    result = client.execute_tool("execute_command", command="nonexistentcommand")
+    assert result["exit_code"] != 0
+    assert result["stderr"]
+
+
+def test_tool_parameter_validation(client):
+    """Test parameter validation for tools."""
+    client = AnthropicClient(tools=TOOL_DEFINITIONS)
+
+    # Test missing required parameter
+    with pytest.raises(TypeError):
+        client.execute_tool("execute_command")
+
+    # Test invalid parameter type
+    with pytest.raises(TypeError, match="Command must be string or list, not int"):
+        client.execute_tool("execute_command", command=123)  # Should be string
+
+    # Test optional parameters
+    result = client.execute_tool(
+        "execute_command", command="echo 'test'", capture_output=False
+    )
+    assert "stdout" in result
+    assert result["stdout"] == ""  # Because capture_output=False
+
+
+def test_tool_integration_with_messages(client):
+    """Test using tools while sending messages."""
+    client = AnthropicClient(tools=TOOL_DEFINITIONS)
+
+    # Send a message that would trigger tool use
+    response = client.send_message(
+        "Run the command 'echo hello'",
+        system="You have access to command execution tools",
+    )
+
+    assert response == "Test response"
+
+    # Verify tool usage was logged
+    last_interaction = client.conversation_history[-2]  # Before assistant response
+    assert "tools_used" in last_interaction
