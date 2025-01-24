@@ -10,6 +10,7 @@ from src.tools import TOOL_DEFINITIONS
 import tempfile
 import shutil
 import anthropic
+import json
 
 
 @pytest.fixture
@@ -397,3 +398,190 @@ def test_tool_integration_with_messages(client):
     # Verify tool usage was logged
     last_interaction = client.conversation_history[-2]  # Before assistant response
     assert "tools_used" in last_interaction
+
+
+def test_tool_response_in_conversation(client, tmp_path):
+    """Test that tool responses are properly included in the conversation context."""
+    # Create a test file
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("Hello, World!")
+
+    # Define tools to use
+    tools_used = [
+        {"tool": "read_file", "args": {"file_path": str(test_file)}},
+        {"tool": "execute_command", "args": {"command": "echo 'test command'"}},
+    ]
+
+    # Send message with tools and verify message structure
+    response = client.send_message(
+        "What's in the test file and what was the command output?",
+        tools_used=tools_used,
+    )
+
+    # Verify the mock response was returned
+    assert response == "Test response"
+
+    # Verify tool messages in conversation history
+    messages = client.conversation.get_messages()
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+
+    assert len(tool_messages) == 2  # Should have two tool messages
+
+    # Verify first tool message (read_file)
+    tool1_data = json.loads(tool_messages[0]["content"])
+    assert tool1_data["tool_name"] == "read_file"
+    assert tool1_data["tool_response"] == "Hello, World!"
+
+    # Verify second tool message (execute_command)
+    tool2_data = json.loads(tool_messages[1]["content"])
+    assert tool2_data["tool_name"] == "execute_command"
+    assert "test command" in tool2_data["tool_response"]["stdout"]
+
+    # Verify tools_used in conversation history
+    last_user_message = [m for m in client.conversation_history if m["role"] == "user"][
+        -1
+    ]
+    assert len(last_user_message["tools_used"]) == 2
+    assert last_user_message["tools_used"][0]["tool"] == "read_file"
+    assert last_user_message["tools_used"][0]["result"] == "Hello, World!"
+    assert last_user_message["tools_used"][1]["tool"] == "execute_command"
+    assert "test command" in last_user_message["tools_used"][1]["result"]["stdout"]
+
+
+def test_conversation_window_token_management():
+    """Test token counting and management in conversation window."""
+    window = ConversationWindow(max_tokens=50)  # Small limit for testing
+
+    # Add message that exceeds token limit
+    long_message = "word " * 100  # Should exceed 50 tokens
+    window.add_message({"role": "user", "content": long_message})
+
+    assert window.token_count <= window.max_tokens
+    assert len(window.messages) == 1
+
+    # Add more messages and verify older ones are removed
+    for i in range(5):
+        window.add_message({"role": "user", "content": f"Message {i}"})
+        assert window.token_count <= window.max_tokens
+
+
+def test_mixed_tool_success_and_failure(client, tmp_path):
+    """Test handling mix of successful and failed tool executions."""
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("test")
+
+    tools_used = [
+        {"tool": "read_file", "args": {"file_path": str(test_file)}},  # Should succeed
+        {"tool": "read_file", "args": {"file_path": "/nonexistent"}},  # Should fail
+        {
+            "tool": "execute_command",
+            "args": {"command": "echo 'test'"},
+        },  # Should succeed
+    ]
+
+    # Should continue despite middle tool failing
+    response = client.send_message("Test message", tools_used=tools_used)
+    assert response == "Test response"  # Verify we got the mock response
+
+    messages = client.conversation.get_messages()
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 3  # All attempts should be recorded
+
+    # Verify success/failure states
+    tool1_data = json.loads(tool_messages[0]["content"])
+    assert tool1_data["tool_response"] == "test"  # First tool succeeded
+
+    tool2_data = json.loads(tool_messages[1]["content"])
+    assert isinstance(tool2_data["tool_response"], str)  # Error message
+    assert "not found" in tool2_data["tool_response"].lower()
+
+    tool3_data = json.loads(tool_messages[2]["content"])
+    assert "test" in tool3_data["tool_response"]["stdout"]  # Third tool succeeded
+
+
+def test_system_message_persistence(client):
+    """Test how system messages persist and stack in conversation."""
+    client.send_message("Hello", system="Be formal")
+    client.send_message("Hi", system="Be casual")
+
+    messages = client.conversation.get_messages()
+    system_messages = [m for m in messages if m["role"] == "system"]
+
+    # Check how multiple system messages are handled
+    assert len(system_messages) == 2
+    assert system_messages[0]["content"] == "Be formal"
+    assert system_messages[1]["content"] == "Be casual"
+
+    # Verify message order
+    roles = [m["role"] for m in messages]
+    assert roles.index("system") < roles.index("user")  # System comes before user
+
+    # Verify system messages are included in API calls
+    with patch.object(client.client.messages, "create") as mock_create:
+        client.send_message("Test", system="New system")
+        call_args = mock_create.call_args[1]
+        assert "system" in call_args
+        assert call_args["system"] == "New system"
+
+
+@patch("time.sleep")  # Prevent actual sleeping in tests
+@patch("time.time")
+def test_rate_limit_recovery(mock_time, mock_sleep, client):
+    """Test recovery after hitting rate limits."""
+    # Start at time 0
+    current_time = 0
+    mock_time.return_value = current_time
+
+    # Fill up rate limit
+    for _ in range(client.rate_limit_per_minute):
+        client.send_message("Test")
+
+    # Verify we hit the limit
+    assert len(client.request_times) == client.rate_limit_per_minute
+
+    # Try to send another message - should trigger rate limit
+    client.send_message("Over limit")
+    assert mock_sleep.called
+
+    # Advance time by 61 seconds
+    current_time += 61
+    mock_time.return_value = current_time
+
+    # Should be able to send again
+    mock_sleep.reset_mock()
+    response = client.send_message("After limit")
+    assert response == "Test response"
+    assert not mock_sleep.called  # Shouldn't hit rate limit
+
+    # Verify old requests were cleared
+    assert len(client.request_times) == 1
+
+
+def test_tool_response_caching(client, tmp_path):
+    """Test caching behavior of tool responses."""
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("cached content")
+
+    # Define tool to use multiple times
+    tool_call = {"tool": "read_file", "args": {"file_path": str(test_file)}}
+
+    # First call
+    response1 = client.execute_tool(tool_call["tool"], **tool_call["args"])
+    assert response1 == "cached content"
+
+    # Change file content
+    test_file.write_text("new content")
+
+    # Second call - should get fresh content, not cached
+    response2 = client.execute_tool(tool_call["tool"], **tool_call["args"])
+    assert response2 == "new content"
+
+    # Verify both calls are recorded in conversation
+    messages = client.conversation.get_messages()
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+
+    tool1_data = json.loads(tool_messages[0]["content"])
+    tool2_data = json.loads(tool_messages[1]["content"])
+
+    assert tool1_data["tool_response"] == "cached content"
+    assert tool2_data["tool_response"] == "new content"
