@@ -110,9 +110,7 @@ def test_protected_vars_loading():
     with tempfile.NamedTemporaryFile() as f:
         f.write(b"API_KEY\nSECRET_TOKEN\n")
         f.flush()
-        with patch(
-            "src.security.environment_protection.load_dockerfile_vars"
-        ) as mock_load:
+        with patch("src.security.core.load_dockerfile_vars") as mock_load:
             mock_load.return_value = {"API_KEY", "SECRET_TOKEN"}
             context = SecurityContext()
             assert "API_KEY" in context.protected_env_vars

@@ -5,7 +5,6 @@ Command execution with security checks.
 from typing import List, Dict, Union, Optional
 import subprocess
 import os
-import shlex
 import re
 from pathlib import Path
 
@@ -144,26 +143,36 @@ class CommandExecutor:
                 - stderr: Command standard error
                 - exit_code: Command exit code
         """
+        # Check command security first
         try:
-            # Check command security first
             if not self._check_command_security(command):
                 return {
                     "stdout": "",
                     "stderr": "Command contains restricted operations",
                     "exit_code": 1,
                 }
+        except CommandError as e:
+            return {
+                "stdout": "",
+                "stderr": str(e),
+                "exit_code": 1,
+            }
 
-            # Get clean environment from os.environ
-            clean_env = self.security_context.get_environment()
+        # Get clean environment from os.environ
+        clean_env = self.security_context.get_environment()
 
-            # Add any explicitly provided environment variables without filtering
-            env = kwargs.get("env", {})
-            clean_env.update(env)
-            kwargs["env"] = clean_env
+        # Add any explicitly provided environment variables without filtering
+        env = kwargs.get("env", {})
+        if env is not None:  # Only update if env is not None
+            clean_env.update(
+                env
+            )  # Let SecurityContext handle protection via sanitize_output
+        kwargs["env"] = clean_env
 
-            # Validate working directory
-            if "working_dir" in kwargs:
-                working_dir = Path(kwargs["working_dir"])
+        # Validate working directory
+        if "working_dir" in kwargs:
+            working_dir = Path(kwargs["working_dir"])
+            try:
                 if not working_dir.exists():
                     return {
                         "stdout": "",
@@ -172,11 +181,18 @@ class CommandExecutor:
                     }
                 kwargs["cwd"] = str(working_dir)
                 del kwargs["working_dir"]
+            except PermissionError:
+                return {
+                    "stdout": "",
+                    "stderr": f"Permission denied accessing working directory: {working_dir}",
+                    "exit_code": 1,
+                }
 
-            # Handle timeout
-            timeout = kwargs.pop("timeout", None)
+        # Handle timeout
+        timeout = kwargs.pop("timeout", None)
 
-            # Run command
+        # Run command
+        try:
             result = subprocess.run(
                 command,
                 capture_output=True,
@@ -199,9 +215,18 @@ class CommandExecutor:
                 "stderr": stderr,
                 "exit_code": result.returncode,
             }
-
-        except subprocess.TimeoutExpired:
-            raise  # Re-raise for test expectations
+        except subprocess.TimeoutExpired as e:
+            return {
+                "stdout": "",
+                "stderr": f"Command timed out after {e.timeout} seconds",
+                "exit_code": -1,
+            }
+        except PermissionError as e:
+            return {
+                "stdout": "",
+                "stderr": f"Permission denied: {e}",
+                "exit_code": 1,
+            }
         except Exception as e:
             return {
                 "stdout": "",
@@ -354,7 +379,7 @@ class CommandExecutor:
                 "exit_code": 0,
             }
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             # Clean up processes
             for proc in processes:
                 proc.kill()
@@ -375,145 +400,89 @@ class CommandExecutor:
                 "exit_code": 1,
             }
 
-    def execute_piped(
-        self,
-        commands: List[Union[str, List[str]]],
-        working_dir: Optional[str | Path] = None,
-        env: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None,
-    ) -> ToolResponse:
-        """Execute a pipeline of commands.
+    def run_piped_commands(self, commands: List[List[str]]) -> ToolResponse:
+        """High-level tool API for executing a pipeline of shell commands.
+
+        This is a simplified interface that wraps CommandExecutor._execute_piped().
+        For successful commands, returns stdout in data field.
+        For failed commands, returns stderr in error field.
+        Full command output (stdout, stderr, exit_code) is available in metadata.
 
         Args:
             commands: List of commands to pipe together
-            working_dir: Optional working directory
-            env: Optional environment variables
-            timeout: Optional timeout in seconds
 
         Returns:
-            ToolResponse containing final command results
+            ToolResponse with simplified output format:
+                - data: stdout for successful commands (stripped)
+                - error: stderr for failed commands
+                - metadata: full output dict with stdout, stderr, exit_code
         """
-        processes = []
         try:
-            # Security checks for all commands using _execute's checks
-            for cmd in commands:
-                result = self._execute(cmd)
-                if result["exit_code"] != 0:
-                    return ToolResponse(
-                        status=ToolResponseStatus.ERROR,
-                        data=result,
-                        error=result["stderr"],
-                    )
-
-            # Set up environment
-            cmd_env = self.security_context.get_environment()
-            if env:
-                # Filter out protected variables from provided env
-                filtered_env = {
-                    k: v
-                    for k, v in env.items()
-                    if k not in self.security_context.protected_env_vars
-                }
-                cmd_env.update(filtered_env)
-
-            # Convert working dir to Path
-            if working_dir:
-                working_dir = Path(working_dir)
-                if not working_dir.exists():
-                    return ToolResponse(
-                        status=ToolResponseStatus.ERROR,
-                        data={
-                            "stdout": "",
-                            "stderr": f"Working directory does not exist: {working_dir}",
-                            "exit_code": 1,
-                        },
-                        error=f"Working directory does not exist: {working_dir}",
-                    )
-
-            # Create pipeline
-            prev_pipe = None
-
-            for i, cmd in enumerate(commands):
-                # Convert command to list if needed
-                if isinstance(cmd, str):
-                    cmd = shlex.split(cmd)
-
-                # Set up pipes
-                if i < len(commands) - 1:
-                    next_pipe = subprocess.PIPE
-                else:
-                    next_pipe = subprocess.PIPE  # Capture final output
-
-                # Start process
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=working_dir,
-                    env=cmd_env,
-                    stdin=prev_pipe,
-                    stdout=next_pipe,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                processes.append(proc)
-                prev_pipe = proc.stdout
-
-            # Wait for all processes
-            stdout, stderr = processes[-1].communicate(timeout=timeout)
-
-            # Check return codes
-            for proc in processes:
-                proc.wait()  # Make sure all processes are done
-                if proc.returncode != 0:
-                    raise CommandError(f"Command failed: {' '.join(proc.args)}")
-
-            # Sanitize and redact output using _execute's helpers
-            stdout = sanitize_text(stdout or "")
-            stderr = sanitize_text(stderr or "")
-            stdout = self.security_context.sanitize_output(stdout, env=env)
-            stderr = self.security_context.sanitize_output(stderr, env=env)
-
+            result = self._execute_piped(commands)
             return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data={
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": 0,
-                },
+                status=(
+                    ToolResponseStatus.SUCCESS
+                    if result["exit_code"] == 0
+                    else ToolResponseStatus.ERROR
+                ),
+                data=(result["stdout"].strip() if result["exit_code"] == 0 else None),
+                error=result["stderr"] if result["exit_code"] != 0 else None,
+                metadata=result,
             )
-
-        except subprocess.TimeoutExpired:
-            # Clean up processes
-            for proc in processes:
-                proc.kill()
-                proc.wait()
+        except Exception:  # No need to capture 'e' since we don't use it
+            # This should never happen since _execute_piped handles all errors
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
-                data={
+                error="Internal error in run_piped_commands",
+                metadata={
                     "stdout": "",
-                    "stderr": f"Pipeline timed out after {timeout} seconds",
-                    "exit_code": -1,
-                },
-                error=f"Pipeline timed out after {timeout} seconds",
-            )
-        except FileNotFoundError as e:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                data={
-                    "stdout": "",
-                    "stderr": f"Command not found: {e.filename}",
+                    "stderr": "Internal error in run_piped_commands",
                     "exit_code": 1,
                 },
-                error=f"Command not found: {e.filename}",
             )
-        except Exception as e:
-            # Clean up processes
-            for proc in processes:
-                proc.kill()
-                proc.wait()
+
+    def run_command(
+        self, command: str, env: Optional[Dict[str, str]] = None
+    ) -> ToolResponse:
+        """High-level tool API for executing shell commands.
+
+        This is a simplified interface that wraps CommandExecutor._execute().
+        For successful commands, returns stdout in data field.
+        For failed commands, returns stderr in error field.
+        Full command output (stdout, stderr, exit_code) is available in metadata.
+
+        Args:
+            command: Shell command to execute
+            env: Optional environment variables to pass to the command
+
+        Returns:
+            ToolResponse with simplified output format:
+                - data: stdout for successful commands (stripped)
+                - error: stderr for failed commands
+                - metadata: full output dict with stdout, stderr, exit_code
+        """
+        try:
+            result = self._execute(command, env=env)
+            return ToolResponse(
+                status=(
+                    ToolResponseStatus.SUCCESS
+                    if result["exit_code"] == 0
+                    else ToolResponseStatus.ERROR
+                ),
+                data=(result["stdout"].strip() if result["exit_code"] == 0 else None),
+                error=result["stderr"] if result["exit_code"] != 0 else None,
+                metadata=result,
+            )
+        except Exception:  # No need to capture 'e' since we don't use it
+            # This should never happen since _execute handles all errors
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
-                data={"stdout": "", "stderr": str(e), "exit_code": 1},
-                error=str(e),
+                error="Internal error in run_command",
+                metadata={
+                    "stdout": "",
+                    "stderr": "Internal error in run_command",
+                    "exit_code": 1,
+                },
             )
 
     def _get_clean_env(self) -> Dict[str, str]:

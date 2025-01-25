@@ -1,14 +1,13 @@
 """Unit tests for command execution."""
 
 import os
-import pytest
-import subprocess
 import tempfile
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 import stat
 
-from src.tools.command import CommandExecutor
+from src.tools.command import CommandExecutor, CommandError
 from src.security.core import SecurityContext
 
 
@@ -153,8 +152,10 @@ def test_execute_with_env(command_executor):
 
 def test_execute_with_timeout(command_executor):
     """Test command execution with timeout."""
-    with pytest.raises(subprocess.TimeoutExpired):
-        command_executor._execute(command="sleep 2", timeout=1)
+    result = command_executor._execute(command="sleep 2", timeout=1)
+    assert result["exit_code"] == -1
+    assert "timed out after 1 seconds" in result["stderr"]
+    assert result["stdout"] == ""
 
 
 def test_execute_not_found(command_executor):

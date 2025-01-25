@@ -192,12 +192,7 @@ class ToolImplementations:
     def read_file(self, path: Union[str, Path]) -> ToolResponse:
         """Read a file with security checks."""
         try:
-            content = self.fs_tools.read_file(path)
-            return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data=content,
-                metadata={"path": str(path)},
-            )
+            return self.fs_tools.read_file(path)
         except Exception as e:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,

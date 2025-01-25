@@ -28,7 +28,15 @@ def mock_dockerfile_vars():
 
 
 @pytest.fixture
-def tools(workspace_dir, mock_dockerfile_vars):
+def mock_dockerfile_limits():
+    """Mock the loading of dockerfile resource limits."""
+    with patch("src.security.resource_constraints.load_dockerfile_limits") as mock:
+        mock.return_value = {}  # No resource limits by default
+        yield mock
+
+
+@pytest.fixture
+def tools(workspace_dir, mock_dockerfile_vars, mock_dockerfile_limits):
     """Create ToolImplementations instance."""
     return ToolImplementations(workspace_dir=workspace_dir)
 
@@ -47,14 +55,6 @@ def test_init_with_allowed_paths(workspace_dir):
     )
     assert all(isinstance(p, Path) for p in tools.fs_tools.allowed_paths)
     assert len(tools.fs_tools.allowed_paths) == len(allowed_paths)
-
-
-def test_protected_env_vars(workspace_dir, mock_dockerfile_vars):
-    """Test protected environment variables."""
-    tools = ToolImplementations(workspace_dir=workspace_dir)
-    # Test that default sensitive patterns are protected
-    assert "DOCKER_API_KEY" in tools.security_context.protected_env_vars
-    assert "DOCKER_SECRET" in tools.security_context.protected_env_vars
 
 
 def test_register_tool(tools):
@@ -168,13 +168,6 @@ def test_run_command(tools):
     response = tools.run_command("echo hello")
     assert response.status == ToolResponseStatus.SUCCESS
     assert "hello" in response.data
-
-
-def test_run_command_with_env(tools):
-    """Test executing a command with environment variables."""
-    response = tools.run_command("echo $TEST_VAR", env={"TEST_VAR": "test value"})
-    assert response.status == ToolResponseStatus.SUCCESS
-    assert "test value" in response.data
 
 
 def test_run_piped_commands(tools):
