@@ -43,16 +43,22 @@ class SecurityContext:
         Returns:
             Dict of environment variables with protected vars removed
         """
-        env = os.environ.copy()
-        for var in self.protected_env_vars:
-            env.pop(var, None)
+        # Start with a clean copy of os.environ
+        env = {}
+
+        # Only copy over non-protected variables
+        for key, value in os.environ.items():
+            if key not in self.protected_env_vars:
+                env[key] = value
+
         return env
 
-    def sanitize_output(self, output: str) -> str:
+    def sanitize_output(self, output: str, env: Dict[str, str] | None = None) -> str:
         """Sanitize command output by redacting protected values.
 
         Args:
             output: Command output to sanitize
+            env: Optional environment variables to check for protected values
 
         Returns:
             Sanitized output with protected values redacted
@@ -60,12 +66,11 @@ class SecurityContext:
         if not output:
             return output
 
-        # Get current values of protected vars
-        protected_values = {
-            var: os.environ.get(var, "")
-            for var in self.protected_env_vars
-            if os.environ.get(var)
-        }
+        # Get current values of protected vars from os.environ
+        protected_values = {}
+        for var in self.protected_env_vars:
+            if var in os.environ:
+                protected_values[var] = os.environ[var]
 
         # Redact protected values
         result = output

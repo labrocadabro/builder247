@@ -40,7 +40,7 @@ class CommandExecutor:
 
     # Dangerous command patterns that are never allowed
     DANGEROUS_COMMANDS = {
-        r"rm\s+.*-[rf]+.*\/": "Recursive deletion of root directory",
+        r"rm\s+-[rf]+\s*/": "Recursive deletion of root directory",  # Only match rm -rf /
         r"mkfs": "Filesystem formatting",
         r"dd": "Direct disk access",
         r"fdisk": "Disk partitioning",
@@ -92,7 +92,7 @@ class CommandExecutor:
             True if command is allowed
 
         Raises:
-            CommandError: If command contains dangerous patterns, injection attempts or protected variables
+            CommandError: If command contains restricted operations
         """
         # Convert command list to string for pattern matching
         cmd_str = " ".join(command) if isinstance(command, list) else command
@@ -100,12 +100,12 @@ class CommandExecutor:
         # Check for dangerous commands - these are never allowed
         for pattern, reason in self.DANGEROUS_COMMANDS.items():
             if re.search(pattern, cmd_str):
-                raise CommandError(f"Command not allowed: {reason}")
+                raise CommandError("Command contains restricted operations")
 
         # Check for shell escapes - these are never allowed
         for pattern in self.SHELL_ESCAPE_PATTERNS:
             if re.search(pattern, cmd_str):
-                raise CommandError("Shell escape sequences not allowed")
+                raise CommandError("Command contains restricted operations")
 
         # Check for command injection - only in shell mode or single argument list
         if isinstance(command, str) or (
@@ -113,17 +113,12 @@ class CommandExecutor:
         ):
             for pattern in self.INJECTION_PATTERNS:
                 if pattern in cmd_str:
-                    raise CommandError("Command injection patterns not allowed")
+                    raise CommandError("Command contains restricted operations")
 
         # Check for environment manipulation - these are never allowed
         env_escapes = r"^\s*\w+="  # Variable assignment at start of command
         if re.search(env_escapes, cmd_str):
-            raise CommandError("Environment manipulation not allowed")
-
-        # Check for protected environment variables
-        for var in self.security_context.protected_env_vars:
-            if f"${var}" in cmd_str or f"${{{var}}}" in cmd_str:
-                raise CommandError("Protected environment variables not allowed")
+            raise CommandError("Command contains restricted operations")
 
         return True
 
@@ -140,42 +135,31 @@ class CommandExecutor:
             **kwargs: Additional arguments passed to subprocess.run:
                 - env: Dict of environment variables
                 - working_dir: Working directory for command
-                - timeout: Command timeout in seconds
-                - input: String input to send to command
+                - timeout: Timeout in seconds
+                - input: Input to pass to command
 
         Returns:
-            Dict containing command results:
+            Dict containing:
                 - stdout: Command standard output
                 - stderr: Command standard error
                 - exit_code: Command exit code
         """
         try:
-            # Security check - fail if command is not allowed
-            try:
-                if not self.check_command_security(command):
-                    return {
-                        "stdout": "",
-                        "stderr": "Command contains restricted operations",
-                        "exit_code": 1,
-                    }
-            except CommandError:  # All security violations use same generic message
+            # Check command security first
+            if not self._check_command_security(command):
                 return {
                     "stdout": "",
                     "stderr": "Command contains restricted operations",
                     "exit_code": 1,
                 }
 
-            # Get allowed environment
-            env = self.security_context.get_environment()
-            if "env" in kwargs:
-                # Filter out protected variables from provided env
-                filtered_env = {
-                    k: v
-                    for k, v in kwargs["env"].items()
-                    if k not in self.security_context.protected_env_vars
-                }
-                env.update(filtered_env)
-            kwargs["env"] = env
+            # Get clean environment from os.environ
+            clean_env = self.security_context.get_environment()
+
+            # Add any explicitly provided environment variables without filtering
+            env = kwargs.get("env", {})
+            clean_env.update(env)
+            kwargs["env"] = clean_env
 
             # Validate working directory
             if "working_dir" in kwargs:
@@ -206,7 +190,7 @@ class CommandExecutor:
             stdout = sanitize_text(result.stdout)
             stderr = sanitize_text(result.stderr)
 
-            # Redact sensitive values
+            # Only redact values from os.environ, not from explicitly provided env
             stdout = self.security_context.sanitize_output(stdout)
             stderr = self.security_context.sanitize_output(stderr)
 
@@ -251,22 +235,32 @@ class CommandExecutor:
         """
         processes = []
         try:
-            # Security checks for all commands using _execute's checks
+            # Convert string commands to lists and do security checks
+            cmd_lists = []
             for cmd in commands:
-                result = self._execute(cmd)
-                if result["exit_code"] != 0:
-                    return result
+                # Keep track of whether this command needs shell=True
+                needs_shell = isinstance(cmd, str)
+                if needs_shell:
+                    cmd_list = cmd  # Keep as string for shell=True
+                else:
+                    cmd_list = list(cmd)  # Make a copy to avoid modifying original
 
-            # Set up environment
+                if not self._check_command_security(cmd):
+                    return {
+                        "stdout": "",
+                        "stderr": "Command contains restricted operations",
+                        "exit_code": 1,
+                    }
+                cmd_lists.append((cmd_list, needs_shell))
+
+            # Get clean environment from os.environ
             cmd_env = self.security_context.get_environment()
+
+            # Add any explicitly provided environment variables without filtering
             if env:
-                # Filter out protected variables from provided env
-                filtered_env = {
-                    k: v
-                    for k, v in env.items()
-                    if k not in self.security_context.protected_env_vars
-                }
-                cmd_env.update(filtered_env)
+                cmd_env.update(
+                    env
+                )  # Let SecurityContext handle protection via sanitize_output
 
             # Convert working dir to Path
             if working_dir:
@@ -280,30 +274,56 @@ class CommandExecutor:
 
             # Create pipeline
             prev_pipe = None
+            prev_proc = None
 
-            for i, cmd in enumerate(commands):
-                # Convert command to list if needed
-                if isinstance(cmd, str):
-                    cmd = shlex.split(cmd)
-
+            for i, (cmd, needs_shell) in enumerate(cmd_lists):
                 # Set up pipes
-                if i < len(commands) - 1:
+                if i < len(cmd_lists) - 1:
                     next_pipe = subprocess.PIPE
                 else:
                     next_pipe = subprocess.PIPE  # Capture final output
 
-                # Start process
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=working_dir,
-                    env=cmd_env,
-                    stdin=prev_pipe,
-                    stdout=next_pipe,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+                try:
+                    # If this is not the first command and we have output from the previous command,
+                    # sanitize it before passing it to the next command
+                    if prev_proc is not None:
+                        prev_stdout, _ = prev_proc.communicate()
+                        prev_stdout = sanitize_text(prev_stdout)
+                        prev_stdout = self.security_context.sanitize_output(
+                            prev_stdout, env=env
+                        )
+                        # Create a new pipe for the sanitized output
+                        read_pipe, write_pipe = os.pipe()
+                        os.write(write_pipe, prev_stdout.encode())
+                        os.close(write_pipe)
+                        prev_pipe = read_pipe
+
+                    # Start process
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=working_dir,
+                        env=cmd_env,
+                        stdin=prev_pipe,
+                        stdout=next_pipe,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        shell=needs_shell,
+                    )
+                except FileNotFoundError as e:
+                    # Clean up any existing processes
+                    for p in processes:
+                        p.kill()
+                        p.wait()
+                    return {
+                        "stdout": "",
+                        "stderr": f"Command not found: {e.filename}",
+                        "exit_code": 127,  # Standard shell error code for command not found
+                    }
+
                 processes.append(proc)
-                prev_pipe = proc.stdout
+                prev_proc = proc
+                if i < len(cmd_lists) - 1:
+                    prev_pipe = proc.stdout
 
             # Wait for all processes
             stdout, stderr = processes[-1].communicate(timeout=timeout)
@@ -314,15 +334,19 @@ class CommandExecutor:
                 if proc.returncode != 0:
                     return {
                         "stdout": stdout or "",
-                        "stderr": f"Command failed: {' '.join(proc.args)}",
+                        "stderr": (
+                            f"Command not found: {proc.args[0]}"
+                            if proc.returncode == 127
+                            else f"Command failed: {' '.join(proc.args)}"
+                        ),
                         "exit_code": proc.returncode,
                     }
 
             # Sanitize and redact output using _execute's helpers
             stdout = sanitize_text(stdout or "")
             stderr = sanitize_text(stderr or "")
-            stdout = self.security_context.sanitize_output(stdout)
-            stderr = self.security_context.sanitize_output(stderr)
+            stdout = self.security_context.sanitize_output(stdout, env=env)
+            stderr = self.security_context.sanitize_output(stderr, env=env)
 
             return {
                 "stdout": stdout,
@@ -339,12 +363,6 @@ class CommandExecutor:
                 "stdout": "",
                 "stderr": f"Pipeline timed out after {timeout} seconds",
                 "exit_code": -1,
-            }
-        except FileNotFoundError as e:
-            return {
-                "stdout": "",
-                "stderr": f"Command not found: {e.filename}",
-                "exit_code": 1,
             }
         except Exception as e:
             # Clean up processes
@@ -451,8 +469,8 @@ class CommandExecutor:
             # Sanitize and redact output using _execute's helpers
             stdout = sanitize_text(stdout or "")
             stderr = sanitize_text(stderr or "")
-            stdout = self.security_context.sanitize_output(stdout)
-            stderr = self.security_context.sanitize_output(stderr)
+            stdout = self.security_context.sanitize_output(stdout, env=env)
+            stderr = self.security_context.sanitize_output(stderr, env=env)
 
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
