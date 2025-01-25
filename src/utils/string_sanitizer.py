@@ -1,4 +1,4 @@
-"""Utility functions shared across tools."""
+"""Text sanitization utilities."""
 
 import unicodedata
 

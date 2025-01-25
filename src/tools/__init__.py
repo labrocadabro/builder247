@@ -1,17 +1,15 @@
 """
-Tool implementations for Anthropic CLI integration.
+Tool implementations for CLI.
 """
 
 from typing import Dict, List
 
-from .implementations import ToolImplementations
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
-from .interfaces import ToolResponse, ToolResponseStatus
+from ..interfaces import ToolResponse, ToolResponseStatus
 
 __all__ = [
     "TOOL_DEFINITIONS",
-    "ToolImplementations",
     "CommandExecutor",
     "FileSystemTools",
     "ToolResponse",
@@ -20,43 +18,19 @@ __all__ = [
 
 TOOL_DEFINITIONS: List[Dict] = [
     {
-        "name": "execute_command",
-        "description": "Execute a shell command and capture its output",
+        "name": "run_command",
+        "description": "Execute a shell command",
         "parameters": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "Command to execute"},
-                "working_dir": {
-                    "type": "string",
-                    "description": "Working directory for command execution",
-                    "optional": True,
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Command timeout in seconds",
-                    "optional": True,
-                },
-                "env": {
-                    "type": "object",
-                    "description": "Environment variables",
-                    "optional": True,
-                },
-                "shell": {
-                    "type": "boolean",
-                    "description": "Whether to execute through shell",
-                    "optional": True,
-                },
-                "capture_output": {
-                    "type": "boolean",
-                    "description": "Whether to capture stdout/stderr",
-                    "optional": True,
-                },
+            "command": {"type": "string", "description": "Command to execute"},
+            "env": {
+                "type": "object",
+                "description": "Environment variables to set",
+                "optional": True,
             },
-            "required": ["command"],
         },
     },
     {
-        "name": "execute_piped",
+        "name": "run_piped_commands",
         "description": "Execute a pipeline of shell commands",
         "parameters": {
             "type": "object",

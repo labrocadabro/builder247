@@ -1,6 +1,5 @@
 """Unit tests for Anthropic client."""
 
-import json
 from unittest.mock import Mock, patch
 import pytest
 
@@ -9,7 +8,7 @@ from src.client import (
     ConversationWindow,
     AnthropicClient,
 )
-from src.tools.interfaces import ToolResponse, ToolResponseStatus
+from src.interfaces import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture

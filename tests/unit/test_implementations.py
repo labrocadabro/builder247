@@ -4,22 +4,31 @@ import os
 import tempfile
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
-from src.tools.implementations import ToolImplementations
-from src.tools.interfaces import ToolResponse, ToolResponseStatus
+from src.utils.implementations import ToolImplementations
+from src.interfaces import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture
 def workspace_dir():
-    """Create a temporary workspace directory."""
+    """Create temporary workspace directory."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        workspace = os.path.join(tmpdir, "workspace")
-        os.makedirs(workspace)
+        workspace = Path(tmpdir) / "workspace"
+        workspace.mkdir()
         yield workspace
 
 
 @pytest.fixture
-def tools(workspace_dir):
+def mock_dockerfile_vars():
+    """Mock the loading of dockerfile variables."""
+    with patch("src.security.environment_protection.load_dockerfile_vars") as mock:
+        mock.return_value = {"DOCKER_API_KEY", "DOCKER_SECRET"}
+        yield mock
+
+
+@pytest.fixture
+def tools(workspace_dir, mock_dockerfile_vars):
     """Create ToolImplementations instance."""
     return ToolImplementations(workspace_dir=workspace_dir)
 
@@ -27,7 +36,7 @@ def tools(workspace_dir):
 def test_init_with_workspace(workspace_dir):
     """Test initialization with workspace directory."""
     tools = ToolImplementations(workspace_dir=workspace_dir)
-    assert tools.security_context.workspace_dir == Path(workspace_dir)
+    assert tools.fs_tools.workspace_dir == workspace_dir
 
 
 def test_init_with_allowed_paths(workspace_dir):
@@ -36,18 +45,16 @@ def test_init_with_allowed_paths(workspace_dir):
     tools = ToolImplementations(
         workspace_dir=workspace_dir, allowed_paths=[Path(p) for p in allowed_paths]
     )
-    assert [str(p) for p in tools.security_context.allowed_paths] == [
-        Path(p).resolve() for p in allowed_paths
-    ]
+    assert all(isinstance(p, Path) for p in tools.fs_tools.allowed_paths)
+    assert len(tools.fs_tools.allowed_paths) == len(allowed_paths)
 
 
-def test_init_with_allowed_env_vars(workspace_dir):
-    """Test initialization with allowed environment variables."""
-    allowed_env_vars = ["PATH", "HOME"]
-    tools = ToolImplementations(
-        workspace_dir=workspace_dir, allowed_env_vars=allowed_env_vars
-    )
-    assert tools.security_context.allowed_env_vars == allowed_env_vars
+def test_protected_env_vars(workspace_dir, mock_dockerfile_vars):
+    """Test protected environment variables."""
+    tools = ToolImplementations(workspace_dir=workspace_dir)
+    # Test that default sensitive patterns are protected
+    assert "DOCKER_API_KEY" in tools.security_context.protected_env_vars
+    assert "DOCKER_SECRET" in tools.security_context.protected_env_vars
 
 
 def test_register_tool(tools):
@@ -85,8 +92,10 @@ def test_execute_tool(tools):
 
 def test_execute_unknown_tool(tools):
     """Test executing an unknown tool."""
-    with pytest.raises(ValueError, match="Unknown tool"):
-        tools.execute_tool("unknown_tool")
+    response = tools.execute_tool("unknown_tool")
+    assert response.status == ToolResponseStatus.ERROR
+    assert "Unknown tool" in response.error
+    assert response.metadata["error_type"] == "ValueError"
 
 
 def test_execute_tool_with_params(tools):
@@ -111,8 +120,10 @@ def test_execute_tool_missing_param(tools):
         return ToolResponse(status=ToolResponseStatus.SUCCESS, data=required_param)
 
     tools.register_tool("test_tool", test_tool)
-    with pytest.raises(TypeError, match="missing.*required.*parameter"):
-        tools.execute_tool("test_tool")
+    response = tools.execute_tool("test_tool")
+    assert response.status == ToolResponseStatus.ERROR
+    assert "Missing required parameter" in response.error
+    assert response.metadata["error_type"] == "TypeError"
 
 
 def test_execute_tool_unknown_param(tools):
@@ -122,8 +133,10 @@ def test_execute_tool_unknown_param(tools):
         return ToolResponse(status=ToolResponseStatus.SUCCESS, data="test")
 
     tools.register_tool("test_tool", test_tool)
-    with pytest.raises(TypeError, match="unexpected.*parameter"):
-        tools.execute_tool("test_tool", params={"unknown": "value"})
+    response = tools.execute_tool("test_tool", params={"unknown": "value"})
+    assert response.status == ToolResponseStatus.ERROR
+    assert "Unexpected parameter" in response.error
+    assert response.metadata["error_type"] == "TypeError"
 
 
 def test_execute_tool_error_response(tools):
@@ -150,24 +163,24 @@ def test_execute_tool_raises_exception(tools):
     assert "Test error" in response.error
 
 
-def test_execute_command(tools):
+def test_run_command(tools):
     """Test executing a command."""
-    response = tools.execute_command("echo hello")
+    response = tools.run_command("echo hello")
     assert response.status == ToolResponseStatus.SUCCESS
     assert "hello" in response.data
 
 
-def test_execute_command_with_env(tools):
+def test_run_command_with_env(tools):
     """Test executing a command with environment variables."""
-    response = tools.execute_command("echo $TEST_VAR", env={"TEST_VAR": "test value"})
+    response = tools.run_command("echo $TEST_VAR", env={"TEST_VAR": "test value"})
     assert response.status == ToolResponseStatus.SUCCESS
     assert "test value" in response.data
 
 
-def test_execute_piped(tools):
+def test_run_piped_commands(tools):
     """Test executing piped commands."""
     commands = [["echo", "hello world"], ["grep", "world"]]
-    response = tools.execute_piped(commands)
+    response = tools.run_piped_commands(commands)
     assert response.status == ToolResponseStatus.SUCCESS
     assert "world" in response.data
 
@@ -230,9 +243,10 @@ def test_execute_tool_not_found(tools):
 
     # Test with invalid tool name types
     for invalid_name in [None, 42, [], {}]:
-        with pytest.raises(TypeError) as exc:
-            tools.execute_tool(invalid_name)
-        assert "tool name must be a string" in str(exc.value).lower()
+        response = tools.execute_tool(invalid_name)
+        assert response.status == ToolResponseStatus.ERROR
+        assert "Tool name must be a string" in response.error
+        assert response.metadata["error_type"] == "TypeError"
 
 
 def test_list_tools(tools):

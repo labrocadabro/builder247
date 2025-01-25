@@ -3,13 +3,13 @@
 import time
 import pytest
 
-from src.tools.retry import (
+from src.utils.retry import (
     RetryConfig,
     RetryHandler,
     CircuitBreaker,
     with_retry,
 )
-from src.tools.interfaces import ToolResponse, ToolResponseStatus
+from src.interfaces import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture

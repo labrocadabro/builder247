@@ -4,62 +4,102 @@ File system operations for Anthropic CLI integration.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union, List
+import tempfile
 
-from .interfaces import (
+from ..interfaces import (
     FileSystemTool,
     ToolResponse,
     ToolResponseStatus,
 )
-from .security import SecurityContext, SecurityError
-from .utils import sanitize_text
+from ..security.core import SecurityContext
+from ..utils.string_sanitizer import sanitize_text
+
+
+class FileSystemError(Exception):
+    """Filesystem operation error."""
+
+    pass
 
 
 class FileSystemTools(FileSystemTool):
-    """Tools for filesystem operations with security checks."""
+    """Tools for filesystem operations."""
 
-    def __init__(self, security_context: SecurityContext):
+    def __init__(
+        self,
+        workspace_dir: Optional[str | Path] = None,
+        allowed_paths: Optional[List[str | Path]] = None,
+    ):
         """Initialize filesystem tools.
 
         Args:
-            security_context: Security context for operations
+            workspace_dir: Root directory for operations, defaults to cwd
+            allowed_paths: Additional allowed paths outside workspace
         """
-        super().__init__(security_context)
-        self._temp_files = set()
+        super().__init__(SecurityContext())
+        self.workspace_dir = (
+            Path(workspace_dir).resolve() if workspace_dir else Path.cwd().resolve()
+        )
+        self.allowed_paths = [Path(p).resolve() for p in (allowed_paths or ["/tmp"])]
 
-    def check_permissions(self, path: Path) -> None:
-        """Check if operation is allowed on path.
-
-        This method validates that:
-        1. The path is within allowed directories
-        2. The path does not contain symlinks to outside allowed dirs
+    def check_path_security(self, path: Union[str, Path]) -> ToolResponse:
+        """Check if path is allowed and safe.
 
         Args:
             path: Path to check
 
-        Raises:
-            SecurityError: If path is not allowed
-            PermissionError: If path exists but permissions are incorrect
-            ValueError: If path is invalid
+        Returns:
+            ToolResponse indicating success or failure
         """
         try:
-            # First check basic security using security context
-            resolved_path = self.security_context.check_path_security(path)
+            path = Path(path)
 
-            # Additional security checks for symlinks
-            if resolved_path.is_symlink():
-                target = resolved_path.readlink()
-                if not any(
-                    target.is_relative_to(allowed)
-                    for allowed in [self.security_context.workspace_dir]
-                    + self.security_context.allowed_paths
-                ):
-                    raise SecurityError(
-                        f"Symlink {path} points outside allowed directories"
+            # Handle relative paths
+            if not path.is_absolute():
+                intended_path = (self.workspace_dir / path).resolve()
+                if not intended_path.is_relative_to(self.workspace_dir):
+                    return ToolResponse(
+                        status=ToolResponseStatus.ERROR,
+                        error=f"Path {path} resolves outside workspace: {intended_path}",
+                        metadata={"error_type": "SecurityError"},
                     )
+                path = self.workspace_dir / path
 
-        except (RuntimeError, ValueError) as e:
-            raise SecurityError(f"Invalid path {path}: {str(e)}")
+            # Get the real path, resolving any symlinks
+            real_path = path.resolve(strict=False)
+
+            # Check if real path is within allowed directories
+            if real_path.is_relative_to(self.workspace_dir):
+                return ToolResponse(status=ToolResponseStatus.SUCCESS, data=real_path)
+            if any(real_path.is_relative_to(allowed) for allowed in self.allowed_paths):
+                return ToolResponse(status=ToolResponseStatus.SUCCESS, data=real_path)
+
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Path {path} resolves outside allowed paths: {real_path}",
+                metadata={"error_type": "SecurityError"},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Invalid path {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__},
+            )
+
+    def check_permissions(self, path: Path) -> ToolResponse:
+        """Check if operation is allowed on path.
+
+        Args:
+            path: Path to check
+
+        Returns:
+            ToolResponse indicating success or failure
+        """
+        result = self.check_path_security(path)
+        if result.status != ToolResponseStatus.SUCCESS:
+            return result
+        return ToolResponse(status=ToolResponseStatus.SUCCESS, data=result.data)
 
     def execute(self, **kwargs) -> ToolResponse:
         """Execute filesystem operation based on provided parameters."""
@@ -104,7 +144,7 @@ class FileSystemTools(FileSystemTool):
             IsADirectoryError: If path is a directory
         """
         path_obj = Path(path)
-        self.check_permissions(path_obj)
+        self.check_path_security(path_obj)
         if not path_obj.exists():
             raise FileNotFoundError(f"File not found: {path}")
         if path_obj.is_dir():
@@ -124,7 +164,7 @@ class FileSystemTools(FileSystemTool):
             IsADirectoryError: If path is a directory
         """
         path_obj = Path(path)
-        self.check_permissions(path_obj)
+        self.check_path_security(path_obj)
         parent_dir = path_obj.parent
         if path_obj.exists():
             if path_obj.is_dir():
@@ -148,7 +188,7 @@ class FileSystemTools(FileSystemTool):
             NotADirectoryError: If path is not a directory
         """
         path_obj = Path(path)
-        self.check_permissions(path_obj)
+        self.check_path_security(path_obj)
         if not path_obj.exists():
             raise FileNotFoundError(f"Directory not found: {path}")
         if not path_obj.is_dir():
@@ -156,38 +196,86 @@ class FileSystemTools(FileSystemTool):
         if not os.access(path, os.R_OK):
             raise PermissionError(f"Directory not readable: {path}")
 
-    def check_file_executable(self, path: str) -> None:
+    def check_file_executable(self, path: str) -> ToolResponse:
         """Check if file is executable.
 
         Args:
             path: Path to check
 
-        Raises:
-            SecurityError: If path is not allowed
-            FileNotFoundError: If file does not exist
-            PermissionError: If file is not executable
-            IsADirectoryError: If path is a directory
+        Returns:
+            ToolResponse indicating success or failure
         """
-        path_obj = Path(path)
-        # Check security first
-        self.check_permissions(path_obj)
-        # Then check existence and permissions
-        if not path_obj.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-        if path_obj.is_dir():
-            raise IsADirectoryError(f"Not a file: {path}")
-        if not os.access(path, os.X_OK):
-            raise PermissionError(f"File not executable: {path}")
-
-    def safe_exists(self, path: Path) -> bool:
-        """Safely check if a path exists."""
         try:
-            self.check_permissions(path)
-            return path.exists()
-        except SecurityError:
-            raise
-        except (OSError, ValueError):
-            return False
+            path_obj = Path(path)
+            # Security check first
+            security_check = self.check_path_security(path_obj)
+            if security_check.status != ToolResponseStatus.SUCCESS:
+                return security_check
+
+            # Then check existence and type
+            if not path_obj.exists():
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"File not found: {path}",
+                    metadata={"error_type": "FileNotFoundError", "path": str(path)},
+                )
+            if path_obj.is_dir():
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"Not a file: {path}",
+                    metadata={"error_type": "IsADirectoryError", "path": str(path)},
+                )
+
+            # Finally check execute permission
+            if not os.access(path_obj, os.X_OK):
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"Permission denied: File not executable: {path}",
+                    metadata={"error_type": "PermissionError", "path": str(path)},
+                )
+
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=path_obj,
+                metadata={"path": str(path)},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Invalid path {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
+
+    def safe_exists(self, path: Path) -> ToolResponse:
+        """Safely check if a path exists with proper security validation.
+
+        Args:
+            path: Path to check
+
+        Returns:
+            ToolResponse indicating success or failure
+        """
+        try:
+            # Check path security first
+            security_check = self.check_path_security(path)
+            if security_check.status != ToolResponseStatus.SUCCESS:
+                return security_check
+
+            # If path is valid, check if it exists
+            exists = path.exists()
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=exists,
+                metadata={"path": str(path)},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Invalid path {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
 
     @staticmethod
     def sanitize_content(content: str) -> str:
@@ -207,214 +295,286 @@ class FileSystemTools(FileSystemTool):
         return sanitize_text(content)
 
     def create_temp_file(
-        self,
-        suffix: Optional[str] = None,
-        prefix: Optional[str] = None,
-        dir: Optional[str] = None,
-    ) -> Path:
-        """Create a temporary file with proper tracking.
-
-        Args:
-            suffix: Optional suffix for temp file
-            prefix: Optional prefix for temp file
-            dir: Optional directory for temp file
-
-        Returns:
-            Path to temporary file
-
-        Raises:
-            SecurityError: If directory is not allowed
-            PermissionError: If directory is not writable
-        """
-        import tempfile
-
-        if dir is not None:
-            dir_path = Path(dir)
-            self.check_permissions(dir_path)
-            if not os.access(dir_path, os.W_OK):
-                raise PermissionError(f"Directory not writable: {dir}")
-
-        temp_file = tempfile.NamedTemporaryFile(
-            mode="w+", suffix=suffix, prefix=prefix, dir=dir, delete=False
-        )
-        temp_path = Path(temp_file.name)
-        self._temp_files.add(temp_path)
-        return temp_path
-
-    def cleanup_temp_files(self) -> None:
-        """Clean up any temporary files created by this tool."""
-        for temp_file in self._temp_files.copy():
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-                self._temp_files.remove(temp_file)
-            except Exception as e:
-                print(f"Warning: Failed to remove temp file {temp_file}: {e}")
-
-    def read_file(
-        self, file_path: str, offset: Optional[int] = None, length: Optional[int] = None
+        self, suffix: Optional[str] = None, dir: Optional[Union[str, Path]] = None
     ) -> ToolResponse:
-        """Read file contents with proper error handling.
+        """Create a temporary file.
 
         Args:
-            file_path: Path to file
-            offset: Optional byte offset to start reading from
-            length: Optional number of bytes to read
+            suffix: Optional file suffix
+            dir: Optional directory to create file in, must be within allowed paths
 
         Returns:
-            ToolResponse with file contents as data
-
-        Raises:
-            SecurityError: If path is not allowed
-            FileNotFoundError: If file does not exist
-            PermissionError: If file is not readable
-            ValueError: If offset/length are invalid
+            ToolResponse containing path to temporary file
         """
         try:
-            self.check_file_readable(file_path)
-            path_obj = Path(file_path)
+            if dir is not None:
+                result = self.check_path_security(dir)
+                if result.status != ToolResponseStatus.SUCCESS:
+                    return result
+                dir = str(result.data)
+            else:
+                dir = str(self.workspace_dir)
 
-            # Validate offset/length
-            file_size = path_obj.stat().st_size
-            if offset is not None:
-                if offset < 0:
-                    raise ValueError("Offset must be non-negative")
-                if offset > file_size:
-                    raise ValueError("Offset is beyond end of file")
-
-            if length is not None:
-                if length < 0:
-                    raise ValueError("Length must be non-negative")
-                if offset is not None and offset + length > file_size:
-                    raise ValueError("Requested range extends beyond end of file")
-
-            with path_obj.open("r") as f:
-                if offset is not None:
-                    f.seek(offset)
-                if length is not None:
-                    content = f.read(length)
-                else:
-                    content = f.read()
-
+            fd, path = tempfile.mkstemp(suffix=suffix, dir=dir)
+            os.close(fd)  # Close file descriptor immediately
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
-                data=self.security_context.sanitize_output(content),
-                metadata={
-                    "size": len(content),
-                    "offset": offset,
-                    "length": length,
-                    "total_size": file_size,
-                },
-            )
-
-        except (SecurityError, FileNotFoundError, PermissionError, ValueError) as e:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=str(e),
-                metadata={"error_type": e.__class__.__name__},
+                data=Path(path),
+                metadata={"path": str(path)},
             )
         except Exception as e:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
-                error=f"Unexpected error reading file: {str(e)}",
-                metadata={"error_type": "UnexpectedError"},
+                error=f"Failed to create temporary file: {str(e)}",
+                metadata={"error_type": e.__class__.__name__},
             )
 
-    def write_file(self, file_path: str, content: str) -> ToolResponse:
-        """Write content to file with proper error handling.
+    def read_file(self, path: Union[str, Path]) -> ToolResponse:
+        """Read contents of a file.
 
         Args:
-            file_path: Path to file
+            path: Path to file
+
+        Returns:
+            ToolResponse containing file contents or error
+        """
+        try:
+            result = self.check_path_security(path)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return result
+
+            path = result.data
+            content = path.read_text()
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=content,
+                metadata={"path": str(path)},
+            )
+        except PermissionError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Permission denied reading from {path}",
+                metadata={"error_type": "PermissionError", "path": str(path)},
+            )
+        except FileNotFoundError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"File not found: {path}",
+                metadata={"error_type": "FileNotFoundError", "path": str(path)},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to read file {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
+
+    def write_file(self, path: Union[str, Path], content: str) -> ToolResponse:
+        """Write content to a file.
+
+        Args:
+            path: Path to file
             content: Content to write
 
         Returns:
             ToolResponse indicating success or failure
-
-        Raises:
-            SecurityError: If path is not allowed
-            PermissionError: If file or parent directory is not writable
-            ValueError: If path is invalid
         """
         try:
-            self.check_file_writable(file_path)
-            path_obj = Path(file_path)
+            result = self.check_path_security(path)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return result
 
-            # Create parent directories if they don't exist
-            try:
-                path_obj.parent.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                raise PermissionError(
-                    f"Permission denied creating directories: {path_obj.parent}"
-                )
-
-            # Write to temporary file first
-            temp_path = self.create_temp_file(
-                suffix=".tmp", prefix=path_obj.name, dir=str(path_obj.parent)
+            path = result.data
+            path.write_text(content)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"path": str(path)},
+                metadata={"path": str(path)},
             )
-
-            try:
-                # Write content to temp file
-                temp_path.write_text(content)
-
-                # Rename temp file to target (atomic operation)
-                temp_path.replace(path_obj)
-
-                # Remove from temp files since it was renamed
-                self._temp_files.remove(temp_path)
-
-                return ToolResponse(
-                    status=ToolResponseStatus.SUCCESS,
-                    metadata={"size": len(content), "path": str(path_obj)},
-                )
-
-            except Exception as e:
-                # Clean up temp file if something went wrong
-                if temp_path.exists():
-                    temp_path.unlink()
-                self._temp_files.remove(temp_path)
-                raise RuntimeError(f"Failed to write file: {e}")
-
-        except (SecurityError, FileNotFoundError, PermissionError, ValueError) as e:
+        except PermissionError:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
-                error=str(e),
-                metadata={"error_type": e.__class__.__name__},
+                error=f"Permission denied writing to {path}",
+                metadata={"error_type": "PermissionError", "path": str(path)},
             )
         except Exception as e:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
-                error=f"Unexpected error writing file: {str(e)}",
-                metadata={"error_type": "UnexpectedError"},
+                error=f"Failed to write file {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
             )
 
-    def list_directory(
-        self, directory: str, pattern: Optional[str] = None
-    ) -> ToolResponse:
-        """List directory contents.
+    def delete_file(self, path: Union[str, Path]) -> ToolResponse:
+        """Delete a file.
 
         Args:
-            directory: Directory to list
-            pattern: Optional glob pattern to filter results
+            path: Path to file
 
         Returns:
-            ToolResponse with list of paths as data
-
-        Raises:
-            FileNotFoundError: If directory does not exist
-            PermissionError: If directory is not readable
-            ValueError: If path is not a directory
+            ToolResponse indicating success or failure
         """
         try:
-            self.check_dir_readable(directory)
-            path_obj = Path(directory)
-            if pattern:
-                paths = [str(p) for p in path_obj.glob(pattern)]
-            else:
-                paths = [str(p) for p in path_obj.iterdir()]
+            result = self.check_path_security(path)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return result
+
+            path = result.data
+            path.unlink()
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
-                data=paths,
-                metadata={"count": len(paths)},
+                data={"path": str(path)},
+                metadata={"path": str(path)},
             )
-        except (FileNotFoundError, NotADirectoryError, PermissionError) as e:
-            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
+        except PermissionError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Permission denied deleting {path}",
+                metadata={"error_type": "PermissionError", "path": str(path)},
+            )
+        except FileNotFoundError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"File not found: {path}",
+                metadata={"error_type": "FileNotFoundError", "path": str(path)},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to delete file {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
+
+    def create_directory(self, path: Union[str, Path]) -> ToolResponse:
+        """Create a directory.
+
+        Args:
+            path: Path to directory
+
+        Returns:
+            ToolResponse indicating success or failure
+        """
+        try:
+            result = self.check_path_security(path)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return result
+
+            path = result.data
+            path.mkdir(parents=True, exist_ok=True)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"path": str(path)},
+                metadata={"path": str(path)},
+            )
+        except PermissionError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Permission denied creating directory {path}",
+                metadata={"error_type": "PermissionError", "path": str(path)},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to create directory {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
+
+    def delete_directory(self, path: Union[str, Path]) -> ToolResponse:
+        """Delete a directory.
+
+        Args:
+            path: Path to directory
+
+        Returns:
+            ToolResponse indicating success or failure
+        """
+        try:
+            result = self.check_path_security(path)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return result
+
+            path = result.data
+            if not path.is_dir():
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"Path {path} is not a directory",
+                    metadata={"error_type": "NotADirectoryError", "path": str(path)},
+                )
+
+            for item in path.iterdir():
+                if item.is_dir():
+                    sub_result = self.delete_directory(item)
+                    if sub_result.status != ToolResponseStatus.SUCCESS:
+                        return sub_result
+                else:
+                    sub_result = self.delete_file(item)
+                    if sub_result.status != ToolResponseStatus.SUCCESS:
+                        return sub_result
+
+            path.rmdir()
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"path": str(path)},
+                metadata={"path": str(path)},
+            )
+        except PermissionError:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Permission denied deleting directory {path}",
+                metadata={"error_type": "PermissionError", "path": str(path)},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to delete directory {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )
+
+    def list_directory(self, path: Union[str, Path]) -> ToolResponse:
+        """List contents of a directory.
+
+        Args:
+            path: Directory to list
+
+        Returns:
+            ToolResponse indicating success or failure
+        """
+        try:
+            path_obj = Path(path)
+            security_check = self.check_path_security(path_obj)
+            if security_check.status != ToolResponseStatus.SUCCESS:
+                return security_check
+
+            if not path_obj.exists():
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"No such file or directory: {path}",
+                    metadata={"error_type": "FileNotFoundError", "path": str(path)},
+                )
+
+            if not path_obj.is_dir():
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"Not a directory: {path}",
+                    metadata={"error_type": "NotADirectoryError", "path": str(path)},
+                )
+
+            if not os.access(path_obj, os.R_OK):
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error=f"Permission denied: {path}",
+                    metadata={"error_type": "PermissionError", "path": str(path)},
+                )
+
+            contents = list(path_obj.iterdir())
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=contents,
+                metadata={"path": str(path)},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to list directory {path}: {str(e)}",
+                metadata={"error_type": e.__class__.__name__, "path": str(path)},
+            )

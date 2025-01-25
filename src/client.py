@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional
 
 import tiktoken
 
-from .tools.implementations import ToolImplementations
-from .tools.interfaces import ToolResponse
+from .utils.implementations import ToolImplementations
+from .interfaces import ToolResponse
 
 
 @dataclass

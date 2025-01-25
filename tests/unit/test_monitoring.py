@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.tools.monitoring import ToolMetric, MetricsCollector, ToolLogger, measure_time
+from src.utils.monitoring import ToolMetric, MetricsCollector, ToolLogger, measure_time
 
 
 @pytest.fixture

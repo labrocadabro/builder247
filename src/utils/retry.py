@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Type, List, Any
 
-from .interfaces import ToolResponse, ToolResponseStatus
+from ..interfaces import ToolResponse, ToolResponseStatus
 
 
 @dataclass

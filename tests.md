@@ -216,3 +216,28 @@ def test_memory_usage(tools):
     current_memory = process.memory_info().rss
     assert (current_memory - initial_memory) < 10 * 1024 * 1024  # 10MB limit
 ```
+
+# Example test using run_command
+
+result = tools.run_command("echo test")
+assert result.status == "success"
+assert "test" in result.data
+
+# Example test using run_piped_commands
+
+result = tools.run_piped_commands([["echo", "hello world"], ["grep", "world"]])
+assert result.status == "success"
+assert "world" in result.data
+
+# Example test with timeout
+
+with pytest.raises(subprocess.TimeoutExpired):
+tools.run_command("sleep 10", timeout=1)
+
+# Example test with file operations and piping
+
+with open(input_file, "w") as f:
+f.write("line1\nline2\nline3")
+result1 = tools.run_piped_commands([["cat", input_file], ["grep", "line"]])
+assert result1.status == "success"
+assert "line" in result1.data

@@ -5,19 +5,27 @@ import pytest
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
+import stat
 
 from src.tools.command import CommandExecutor
-from src.tools.security import SecurityContext
+from src.security.core import SecurityContext
 
 
 @pytest.fixture
-def security_context():
+def protected_vars():
+    """Protected environment variables for testing."""
+    return {"DOCKER_API_KEY", "DOCKER_SECRET"}
+
+
+@pytest.fixture
+def security_context(protected_vars):
     """Create a security context for testing."""
-    return SecurityContext(
-        allowed_paths=["/tmp", "/workspace"],
-        allowed_env_vars=["PATH", "HOME"],
-        restricted_commands=[],
-    )
+    with patch(
+        "src.security.environment_protection.load_dockerfile_vars",
+        return_value=protected_vars,
+    ):
+        yield SecurityContext()
 
 
 @pytest.fixture
@@ -35,64 +43,133 @@ def temp_dir():
 
 def test_check_command_security_safe(command_executor):
     """Test security check for safe command."""
-    command_executor.check_command_security("ls -l")
+    assert command_executor.check_command_security("ls -l") is True
+    assert command_executor.check_command_security(["ls", "-l"]) is True
 
 
 def test_check_command_security_unsafe(command_executor):
     """Test security check for unsafe commands."""
-    with pytest.raises(ValueError):
-        command_executor.check_command_security("rm -rf /")
+    # Dangerous system commands should return False
+    assert command_executor.check_command_security("rm -rf /") is False
+    assert command_executor.check_command_security("sudo su") is False
+    assert command_executor.check_command_security("chmod +x script.sh") is False
+
+    # Shell injection attempts should return False
+    assert command_executor.check_command_security("echo $(cat /etc/passwd)") is False
+    assert command_executor.check_command_security("echo `cat /etc/passwd`") is False
+    assert command_executor.check_command_security("echo test && echo hack") is False
 
 
 def test_check_command_security_env_vars(command_executor):
     """Test security check for environment variables."""
-    command_executor.check_command_security("echo $PATH")
-    command_executor.check_command_security("echo $HOME")
-    with pytest.raises(ValueError):
-        command_executor.check_command_security("echo $SECRET_KEY")
+    # Test regular environment variables are allowed
+    assert command_executor.check_command_security("echo $PATH") is True
+    assert command_executor.check_command_security("echo $HOME") is True
+    assert command_executor.check_command_security("echo $TEST_VAR") is True
+    assert command_executor.check_command_security("echo $CUSTOM_VAR") is True
+    assert (
+        command_executor.check_command_security("echo $SECRET_KEY") is True
+    )  # Not in Dockerfile
+    assert (
+        command_executor.check_command_security("echo $API_TOKEN") is True
+    )  # Not in Dockerfile
+
+    # Test Dockerfile protected variables are blocked
+    assert command_executor.check_command_security("echo $DOCKER_API_KEY") is False
+    assert command_executor.check_command_security("echo $DOCKER_SECRET") is False
+
+    # Test complex variable usage
+    assert command_executor.check_command_security("echo ${PATH}") is True
+    assert command_executor.check_command_security("echo ${HOME}") is True
+    assert command_executor.check_command_security("echo ${DOCKER_API_KEY}") is False
+    assert command_executor.check_command_security("echo ${DOCKER_SECRET}") is False
+
+    # Test environment manipulation is blocked
+    assert (
+        command_executor.check_command_security("TEST_VAR=hello echo $TEST_VAR")
+        is False
+    )
+    assert (
+        command_executor.check_command_security("DOCKER_API_KEY=123 echo ok") is False
+    )
 
 
 def test_execute_simple_command(command_executor):
     """Test executing a simple command."""
-    result = command_executor.execute(command="echo test")
-    assert result.status == "success"
-    assert "test" in result.data["stdout"]
+    result = command_executor._execute(command="echo test")
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+    assert result["stderr"] == ""
 
 
 def test_execute_command_list(command_executor):
     """Test executing a command as list."""
-    result = command_executor.execute(command=["echo", "test"])
-    assert result.status == "success"
-    assert "test" in result.data["stdout"]
+    result = command_executor._execute(command=["echo", "test"])
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+    assert result["stderr"] == ""
 
 
 def test_execute_with_working_dir(command_executor, temp_dir):
     """Test executing command in specific working directory."""
-    result = command_executor.execute(command="pwd", working_dir=str(temp_dir))
-    assert result.status == "success"
-    assert str(temp_dir) in result.data["stdout"]
+    result = command_executor._execute(command="pwd", working_dir=str(temp_dir))
+    assert result["exit_code"] == 0
+    assert str(temp_dir) in result["stdout"]
+
+    # Test with non-existent working directory
+    result = command_executor._execute(command="pwd", working_dir="/nonexistent/dir")
+    assert result["exit_code"] == 1
+    assert "directory does not exist" in result["stderr"].lower()
 
 
 def test_execute_with_env(command_executor):
     """Test executing command with environment variables."""
-    result = command_executor.execute(
+    # Test with allowed environment variable
+    result = command_executor._execute(
         command="echo $TEST_VAR", env={"TEST_VAR": "test_value"}
     )
-    assert result.status == "success"
-    assert "test_value" in result.data["stdout"]
+    assert result["exit_code"] == 0
+    assert "test_value" in result["stdout"]
+
+    # Test with multiple allowed environment variables
+    result = command_executor._execute(
+        command="echo $VAR1 $VAR2", env={"VAR1": "value1", "VAR2": "value2"}
+    )
+    assert result["exit_code"] == 0
+    assert "value1" in result["stdout"]
+    assert "value2" in result["stdout"]
+
+    # Test with protected Dockerfile variable
+    result = command_executor._execute(
+        command="echo $DOCKER_API_KEY", env={"DOCKER_API_KEY": "secret"}
+    )
+    assert result["exit_code"] == 1
+    assert "restricted operations" in result["stderr"].lower()
+
+    # Test with non-protected variable that happens to contain "secret"
+    result = command_executor._execute(
+        command="echo $MY_SECRET", env={"MY_SECRET": "secret"}
+    )
+    assert result["exit_code"] == 0
+    assert "secret" in result["stdout"]
+
+    # Test environment isolation
+    result = command_executor._execute(command="echo $ISOLATED_VAR", env={})
+    assert result["exit_code"] == 0
+    assert "ISOLATED_VAR" not in result["stdout"]
 
 
 def test_execute_with_timeout(command_executor):
     """Test command execution with timeout."""
     with pytest.raises(subprocess.TimeoutExpired):
-        command_executor.execute(command="sleep 2", timeout=1)
+        command_executor._execute(command="sleep 2", timeout=1)
 
 
 def test_execute_command_not_found(command_executor):
     """Test executing non-existent command."""
-    result = command_executor.execute(command="nonexistentcmd")
-    assert result.status == "error"
-    assert "not found" in result.error.lower()
+    result = command_executor._execute(command="nonexistentcmd")
+    assert result["exit_code"] != 0
+    assert "not found" in result["stderr"].lower()
 
 
 def test_execute_permission_denied(command_executor, temp_dir):
@@ -101,48 +178,221 @@ def test_execute_permission_denied(command_executor, temp_dir):
     script_path.write_text("#!/bin/sh\necho test")
     os.chmod(script_path, 0o644)  # Remove execute permission
 
-    result = command_executor.execute(command=str(script_path))
-    assert result.status == "error"
-    assert "permission denied" in result.error.lower()
+    result = command_executor._execute(command=str(script_path))
+    assert result["exit_code"] != 0
+    assert "permission denied" in result["stderr"].lower()
 
 
-def test_execute_with_shell(command_executor):
+def test_execute_with_shell(command_executor, temp_dir):
     """Test executing command with shell."""
-    result = command_executor.execute(command="echo $HOME", shell=True)
-    assert result.status == "success"
-    assert result.data["stdout"].strip()
+    # Create a test file
+    test_file = temp_dir / "test.txt"
+    test_file.write_text("test content")
+
+    # Test basic shell features
+    result = command_executor._execute(command="echo $HOME")
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip()
+
+    # Test shell operators are blocked for security
+    result = command_executor._execute(command="echo test && echo success")
+    assert result["exit_code"] == 1
+    assert "restricted operations" in result["stderr"].lower()
+
+    # Test shell expansion
+    result = command_executor._execute(command="echo *", working_dir=str(temp_dir))
+    assert result["exit_code"] == 0
+    assert "test.txt" in result["stdout"]
 
 
 def test_execute_without_shell(command_executor):
     """Test executing command without shell."""
-    result = command_executor.execute(command=["echo", "test"], shell=False)
-    assert result.status == "success"
-    assert "test" in result.data["stdout"]
+    # Basic command should work
+    result = command_executor._execute(command=["echo", "test"])
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+
+    # Shell operators in arguments should be treated as literal strings
+    result = command_executor._execute(command=["echo", "test && echo success"])
+    assert result["exit_code"] == 0
+    assert "test && echo success" in result["stdout"]
+
+    # But shell operators in the command itself should be blocked
+    result = command_executor._execute(command=["echo test && echo success"])
+    assert result["exit_code"] == 1
+    assert "restricted operations" in result["stderr"].lower()
 
 
 def test_execute_with_output_capture(command_executor):
     """Test command execution with output capture."""
-    result = command_executor.execute(command="echo test", capture_output=True)
-    assert result.status == "success"
-    assert "test" in result.data["stdout"]
+    # Test stdout capture
+    result = command_executor._execute(command="echo test")
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+    assert result["stderr"] == ""
 
+    # Test stderr capture
+    result = command_executor._execute(command="echo error >&2")
+    assert result["exit_code"] == 0
+    assert "error" in result["stderr"]
 
-def test_execute_piped_commands(command_executor):
-    """Test executing piped commands."""
-    result = command_executor.execute_piped(commands=["echo test", "grep test"])
-    assert result.status == "success"
-    assert "test" in result.data["stdout"]
-
-
-def test_execute_piped_commands_error(command_executor):
-    """Test error in piped commands."""
-    result = command_executor.execute_piped(commands=["echo test", "nonexistentcmd"])
-    assert result.status == "error"
-    assert "failed" in result.error.lower()
+    # Test large output
+    large_output = command_executor._execute(command="yes | head -n 1000")
+    assert large_output["exit_code"] == 0
+    assert len(large_output["stdout"]) > 0
 
 
 def test_sanitize_output(command_executor):
     """Test output sanitization."""
-    result = command_executor.execute(command="echo 'test\0test'")
-    assert result.status == "success"
-    assert "\0" not in result.data["stdout"]
+    # Test basic output
+    result = command_executor._execute(command="echo 'test'")
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+
+    # Test with special characters
+    result = command_executor._execute(command="echo 'test\ntest'")
+    assert result["exit_code"] == 0
+    assert "test\ntest" in result["stdout"]
+
+    # Test with null bytes should be sanitized
+    result = command_executor._execute(command="printf 'test\\0test'")
+    assert result["exit_code"] == 0
+    assert "testtest" in result["stdout"]
+
+
+def test_execute_with_input(command_executor):
+    """Test command execution with input."""
+    # Test basic input
+    result = command_executor._execute(command="cat", input="test input")
+    assert result["exit_code"] == 0
+    assert "test input" in result["stdout"]
+
+    # Test multiline input
+    result = command_executor._execute(command="cat", input="line1\nline2\nline3")
+    assert result["exit_code"] == 0
+    assert "line1" in result["stdout"]
+    assert "line2" in result["stdout"]
+    assert "line3" in result["stdout"]
+
+
+def test_permission_denied_scenarios(command_executor):
+    """Test handling of various permission denied scenarios."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        # Test executing in a directory without execute permission
+        no_exec_dir = tmp_path / "no_exec_dir"
+        no_exec_dir.mkdir()
+        try:
+            os.chmod(no_exec_dir, 0o666)  # Remove execute permission
+            result = command_executor._execute("ls", working_dir=str(no_exec_dir))
+            assert result["exit_code"] != 0
+            assert "permission denied" in result["stderr"].lower()
+        finally:
+            os.chmod(no_exec_dir, 0o755)  # Restore permissions for cleanup
+
+        # Test writing to a read-only directory
+        readonly_dir = tmp_path / "readonly_dir"
+        readonly_dir.mkdir()
+        try:
+            os.chmod(readonly_dir, 0o555)  # Read and execute only
+            result = command_executor._execute(f"touch {readonly_dir}/test.txt")
+            assert result["exit_code"] != 0
+            assert "permission denied" in result["stderr"].lower()
+        finally:
+            os.chmod(readonly_dir, 0o755)  # Restore permissions for cleanup
+
+        # Test writing to a read-only file
+        with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tf:
+            temp_file = Path(tf.name)
+        try:
+            os.chmod(temp_file, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            result = command_executor._execute(f"echo 'test' > {temp_file}")
+            assert result["exit_code"] != 0
+            assert "permission denied" in result["stderr"].lower()
+            # Verify file wasn't modified
+            assert temp_file.read_text() == ""
+        finally:
+            os.chmod(temp_file, 0o644)
+            temp_file.unlink()
+
+
+def test_command_with_restricted_env(command_executor, protected_vars):
+    """Test command execution with restricted environment."""
+    # Test protected variables from Dockerfile
+    # Test that protected variables are blocked in commands
+    for var in protected_vars:
+        os.environ[var] = "secret"
+        result = command_executor._execute(f"echo ${var}")
+        assert result["exit_code"] == 1
+        assert "restricted operations" in result["stderr"].lower()
+        del os.environ[var]
+
+    # Test that non-protected variables are allowed
+    result = command_executor._execute("echo $USER")
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip()
+
+    # Test that environment is properly filtered
+    os.environ["TEST_VAR"] = "test_value"
+    os.environ["DOCKER_API_KEY"] = "secret"
+    result = command_executor._execute("env")
+    assert result["exit_code"] == 0
+    assert "TEST_VAR=test_value" in result["stdout"]
+    assert "DOCKER_API_KEY" not in result["stdout"]
+    del os.environ["TEST_VAR"]
+    del os.environ["DOCKER_API_KEY"]
+
+
+def test_execute_piped_low_level(command_executor):
+    """Test low-level piped command execution."""
+    # Basic pipe
+    result = command_executor._execute_piped(commands=["echo test", "grep test"])
+    assert result["exit_code"] == 0
+    assert "test" in result["stdout"]
+    assert result["stderr"] == ""
+
+    # Multiple pipes
+    result = command_executor._execute_piped(
+        commands=["echo test", "tr [:lower:] [:upper:]", "grep TEST"]
+    )
+    assert result["exit_code"] == 0
+    assert "TEST" in result["stdout"]
+    assert result["stderr"] == ""
+
+    # Test with environment variables
+    result = command_executor._execute_piped(
+        commands=["echo test_value", "grep value"],
+        env={"TEST_VAR": "test_value"},
+    )
+    assert result["exit_code"] == 0
+    assert "value" in result["stdout"]
+    assert result["stderr"] == ""
+
+    # Test with protected environment variables
+    result = command_executor._execute_piped(
+        commands=["echo $DOCKER_API_KEY", "grep secret"],
+        env={"DOCKER_API_KEY": "secret"},
+    )
+    assert result["exit_code"] == 1
+    assert "restricted operations" in result["stderr"]
+
+
+def test_execute_piped_low_level_error(command_executor):
+    """Test error handling in low-level piped command execution."""
+    # Error in first command
+    result = command_executor._execute_piped(commands=["nonexistentcmd", "grep test"])
+    assert result["exit_code"] == 1
+    assert "not found" in result["stderr"].lower()
+
+    # Error in second command
+    result = command_executor._execute_piped(commands=["echo test", "nonexistentcmd"])
+    assert result["exit_code"] == 1
+    assert "not found" in result["stderr"].lower()
+
+    # Error in middle command
+    result = command_executor._execute_piped(
+        commands=["echo test", "nonexistentcmd", "grep test"]
+    )
+    assert result["exit_code"] == 1
+    assert "not found" in result["stderr"].lower()
