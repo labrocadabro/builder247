@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 import stat
 
-from src.tools.command import CommandExecutor, CommandError
+from src.tools.command import CommandExecutor
 from src.security.core import SecurityContext
 
 

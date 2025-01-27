@@ -379,7 +379,7 @@ class CommandExecutor:
                 "exit_code": 0,
             }
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             # Clean up processes
             for proc in processes:
                 proc.kill()
