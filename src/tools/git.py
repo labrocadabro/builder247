@@ -10,17 +10,24 @@ load_dotenv()
 class GitAutomation:
     def __init__(self, git_dir):
         self.token = os.getenv("GITHUB_TOKEN")
-        if not self.token:
+        self.ssh_key = os.getenv("SSH_KEY")
+        if not self.token or not self.ssh_key:
             print("Error: GITHUB_TOKEN environment variable not set")
             sys.exit(1)
-  
-        git_ssh_identity_file = os.path.join(os.getcwd(),'id_rsa')
-        self.git_ssh_cmd = 'ssh -i %s' % git_ssh_identity_file
+        
+        self.git_ssh_identity_file = os.path.join(os.getcwd(),'id_rsa')
+        self._initialize_gitAutomation()
+        self.git_ssh_cmd = 'ssh -i %s' % self.git_ssh_identity_file
 
         self.main_git_dir = Path(git_dir) / "main_git_dir"
         self.github_api_url = "https://api.github.com"
         self.headers = {"Authorization": f"Bearer {self.token}"}
-
+    def _initialize_gitAutomation(self):
+        # check if this git_ssh_identity_file = os.path.join(os.getcwd(),'id_rsa') exists
+        if not os.path.exists(self.git_ssh_identity_file):
+            with open(self.git_ssh_identity_file, 'w') as f:
+                f.write(self.ssh_key)
+            
     def check_fork_exists(self, owner, repo_name):
         response = requests.get(f"{self.github_api_url}/repos/{owner}/{repo_name}", headers=self.headers)
         

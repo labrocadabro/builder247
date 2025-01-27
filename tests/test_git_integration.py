@@ -36,9 +36,9 @@ def test_sync_fork():
 
 if __name__ == "__main__":
     # test_fork_repo()
-    # test_check_fork_exists()
+    test_check_fork_exists()
     # test_clone_repo()
     # test_checkout_new_branch()
     # test_commit_and_push()
     # test_create_pr()
-    test_sync_fork()
+    # test_sync_fork()
