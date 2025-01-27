@@ -7,7 +7,7 @@ from typing import Dict, List
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
 from .implementations import ToolImplementations
-from ..interfaces import ToolResponse, ToolResponseStatus
+from .types import ToolResponse, ToolResponseStatus
 
 __all__ = [
     "TOOL_DEFINITIONS",

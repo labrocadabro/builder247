@@ -11,6 +11,7 @@ from datetime import datetime
 import sqlite3
 import tiktoken
 from threading import Lock
+import os
 
 
 def adapt_datetime(dt):
@@ -28,14 +29,28 @@ def convert_datetime(val):
 class ConversationHistoryManager:
     """Manages conversation history with persistent storage."""
 
-    def __init__(self, storage_dir: Union[str, Path] = "conversations"):
-        """Initialize the history manager.
+    def __init__(self, storage_dir: str | Path) -> None:
+        """Initialize conversation history manager.
 
         Args:
-            storage_dir: Directory for storing conversation data
+            storage_dir: Directory for storing conversation history
+
+        Raises:
+            ValueError: If storage directory path is invalid or inaccessible
         """
         self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(exist_ok=True)
+
+        # Validate and create storage directory
+        try:
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+            if not os.access(self.storage_dir, os.W_OK):
+                raise ValueError(f"Storage directory is not writable: {storage_dir}")
+        except (OSError, RuntimeError) as e:
+            raise ValueError(
+                f"Cannot create or access storage directory: {storage_dir}"
+            ) from e
+
+        # Initialize database
         self.db_path = self.storage_dir / "conversations.db"
         self.encoder = tiktoken.get_encoding("cl100k_base")
         self.lock = Lock()
@@ -45,6 +60,9 @@ class ConversationHistoryManager:
 
     def _get_connection(self):
         """Get a SQLite connection with datetime handling."""
+        # Ensure parent directory exists
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
         return sqlite3.connect(
             self.db_path,
             detect_types=sqlite3.PARSE_DECLTYPES,

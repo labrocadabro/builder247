@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Callable, Type, List, TypeVar
 
-from ..interfaces import ToolResponse, ToolResponseStatus
+from src.tools.types import ToolResponse, ToolResponseStatus
 
 T = TypeVar("T")
 

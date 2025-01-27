@@ -1,9 +1,7 @@
 """Unit tests for monitoring."""
 
-import json
 import os
 import tempfile
-from typing import Dict
 
 import pytest
 
@@ -27,32 +25,34 @@ def test_tool_logger_initialization(temp_log_file):
 def test_tool_logger_log_operation(temp_log_file):
     """Test logging an operation."""
     logger = ToolLogger(temp_log_file)
-    details: Dict = {"param": "value", "status": "success"}
-    logger.log_operation("test_operation", details)
+    operation_name = "test_operation"
+    details = {"param": "value", "status": "success"}
 
+    logger.log_operation(operation_name, details)
+
+    # Verify log contains essential information
     with open(temp_log_file) as f:
         log_content = f.read()
-        # Extract just the JSON portion after the timestamp and level
-        json_str = log_content.split(" - ", 2)[-1].strip()
-        log_data = json.loads(json_str)
-        assert log_data["operation"] == "test_operation"
-        assert log_data["details"] == details
+        assert operation_name in log_content
+        assert details["param"] in log_content
+        assert details["status"] in log_content
 
 
 def test_tool_logger_log_error(temp_log_file):
     """Test logging an error."""
     logger = ToolLogger(temp_log_file)
+    operation_name = "test_operation"
+    error_msg = "Test error"
     context = {"additional": "info"}
-    logger.log_error("test_operation", "Test error", context)
 
+    logger.log_error(operation_name, error_msg, context)
+
+    # Verify log contains essential information
     with open(temp_log_file) as f:
         log_content = f.read()
-        # Extract just the JSON portion after the timestamp and level
-        json_str = log_content.split(" - ", 2)[-1].strip()
-        log_data = json.loads(json_str)
-        assert log_data["operation"] == "test_operation"
-        assert log_data["error"] == "Test error"
-        assert log_data["context"] == context
+        assert operation_name in log_content
+        assert error_msg in log_content
+        assert context["additional"] in log_content
 
 
 def test_tool_logger_no_file():

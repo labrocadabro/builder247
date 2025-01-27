@@ -19,7 +19,7 @@ The central coordinator that manages the implementation workflow:
 
 Key classes:
 
-- `AgentConfig`: Configuration container
+- `AgentConfig`: Configuration container for agent settings and security policies
 - `ImplementationAgent`: Main implementation logic
 
 ### 2. Anthropic Client (`src/client.py`)
@@ -61,6 +61,7 @@ Provides a set of safe operations for the AI to interact with the system:
 - High-level tool registry
 - Tool execution coordination
 - Error handling and retries
+- Security policy enforcement
 
 ### 4. Security (`src/security/`)
 
@@ -68,7 +69,8 @@ Manages security constraints and resource protection:
 
 #### Core Security (`src/security/core.py`)
 
-- Resource limits management
+- Path access control
+- Command restrictions
 - Environment variable protection
 - Output sanitization
 
@@ -77,12 +79,6 @@ Manages security constraints and resource protection:
 - Protected variable management
 - Environment sanitization
 - Dockerfile variable loading
-
-#### Resource Constraints (`src/security/resource_constraints.py`)
-
-- System resource limits
-- Process constraints
-- Resource monitoring
 
 ### 5. Utilities (`src/utils/`)
 
@@ -123,7 +119,8 @@ Common utilities and helper functions:
 
    ```
    Tools -> SecurityContext
-        -> Resource limits
+        -> Path validation
+        -> Command restrictions
         -> Environment protection
         -> Output sanitization
    ```
@@ -137,26 +134,40 @@ Common utilities and helper functions:
 
 ## Security Architecture
 
-### 1. Command Execution Security
+### 1. Path Security
 
-- Pattern-based command filtering
-- Environment variable protection
-- Working directory validation
-- Shell injection prevention
-
-### 2. File System Security
-
+- Workspace directory isolation
+- Allowed paths configuration
 - Path traversal prevention
-- Permission checks
-- Workspace isolation
-- Safe file operations
+- Symlink protection
+
+### 2. Command Security
+
+- Restricted command list
+- Command injection prevention
+- Environment variable isolation
+- Output sanitization
 
 ### 3. Environment Protection
 
-- Sensitive variable filtering
-- Output redaction
-- Resource limits
-- Process isolation
+- Allowed environment variables
+- Variable value sanitization
+- Protected variable list
+- Environment isolation
+
+### 4. File Operations
+
+- Size limits
+- Permission checks
+- Content validation
+- Safe file handling
+
+### 5. Error Handling
+
+- Secure error messages
+- Resource cleanup
+- Retry policies
+- Failure isolation
 
 ## Testing Architecture
 

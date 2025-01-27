@@ -8,7 +8,7 @@ from unittest.mock import patch
 import stat
 
 from src.tools.command import CommandExecutor
-from src.security.core import SecurityContext
+from src.security.core_context import SecurityContext
 
 
 @pytest.fixture
@@ -165,8 +165,12 @@ def test_execute_not_found(command_executor):
     assert "not found" in result["stderr"].lower()
 
 
-def test_execute_permission_denied(command_executor, temp_dir):
-    """Test executing command without permission."""
+def test_os_blocks_non_executable_files(command_executor, temp_dir):
+    """Test that OS blocks execution of non-executable files.
+
+    This verifies that attempting to execute a file without execute permission
+    results in an OS-level permission denied error.
+    """
     script_path = temp_dir / "test.sh"
     script_path.write_text("#!/bin/sh\necho test")
     os.chmod(script_path, 0o644)  # Remove execute permission
@@ -174,6 +178,35 @@ def test_execute_permission_denied(command_executor, temp_dir):
     result = command_executor._execute(command=str(script_path))
     assert result["exit_code"] != 0
     assert "permission denied" in result["stderr"].lower()
+
+
+def test_os_blocks_directory_access(command_executor, temp_dir):
+    """Test OS-level permission denied errors for directory access.
+
+    This verifies that attempting to access files in a non-executable directory
+    results in an OS-level permission denied error.
+    """
+    # Create a nested directory structure
+    test_dir = temp_dir / "test_dir"
+    test_dir.mkdir()
+
+    # Create a script in the directory
+    script_path = test_dir / "test.sh"
+    script_path.write_text("#!/bin/sh\necho test")
+    os.chmod(script_path, 0o755)  # Make script executable
+
+    # Remove execute permission from the directory itself
+    os.chmod(test_dir, 0o666)  # r/w but not executable
+
+    try:
+        # Attempting to execute anything in a non-executable directory
+        # triggers OS permission denied
+        result = command_executor._execute(command=str(script_path))
+        assert result["exit_code"] != 0
+        assert "permission denied" in result["stderr"].lower()
+    finally:
+        # Restore permissions for cleanup
+        os.chmod(test_dir, 0o755)
 
 
 def test_execute_with_shell(command_executor, temp_dir):

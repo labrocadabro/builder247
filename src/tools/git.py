@@ -1,131 +1,462 @@
-import os
-import sys
+"""Git automation tools with security checks."""
+
 from pathlib import Path
-from git import Repo
+from typing import Dict, List, Optional, Union
+from git import GitCommandError, InvalidGitRepositoryError, Repo
 import requests
-from dotenv import load_dotenv
+import re
 
-load_dotenv()
-# https://gitpython.readthedocs.io/en/stable/tutorial.html
-class GitAutomation:
-    def __init__(self, git_dir):
-        self.token = os.getenv("GITHUB_TOKEN")
-        self.ssh_key = os.getenv("SSH_KEY")
-        if not self.token or not self.ssh_key:
-            print("Error: GITHUB_TOKEN environment variable not set")
-            sys.exit(1)
-        
-        self.git_ssh_identity_file = os.path.join(os.getcwd(),'id_rsa')
-        self._initialize_gitAutomation()
-        self.git_ssh_cmd = 'ssh -i %s' % self.git_ssh_identity_file
+from git.objects import Commit
+from git.refs import Head
 
-        self.main_git_dir = Path(git_dir) / "main_git_dir"
+from .types import ToolResponse, ToolResponseStatus
+from ..utils.retry import with_retry, RetryConfig
+from .implementations import ToolImplementations
+
+
+class GitTools:
+    """Git operations with GitHub API integration."""
+
+    def __init__(self, workspace_dir: Path, security_context):
+        """Initialize GitTools.
+
+        Args:
+            workspace_dir: Base directory for Git operations
+            security_context: Security context for environment handling
+        """
+        self.workspace_dir = workspace_dir
+        self.security_context = security_context
+        self.git_dir = workspace_dir / "git_workspace"
+
+        # Get GitHub token from security context
+        env = self.security_context.get_environment()
+        self.token = env.get("GITHUB_TOKEN")
+
+        if not self.token:
+            raise ValueError("Missing required GitHub token")
+
+        # Set up GitHub configuration
         self.github_api_url = "https://api.github.com"
-        self.headers = {"Authorization": f"Bearer {self.token}"}
-    def _initialize_gitAutomation(self):
-        # check if this git_ssh_identity_file = os.path.join(os.getcwd(),'id_rsa') exists
-        if not os.path.exists(self.git_ssh_identity_file):
-            with open(self.git_ssh_identity_file, 'w') as f:
-                f.write(self.ssh_key)
-            
-    def check_fork_exists(self, owner, repo_name):
-        response = requests.get(f"{self.github_api_url}/repos/{owner}/{repo_name}", headers=self.headers)
-        
-        if response.status_code == 200:
-            return True
-        print("Failed to check forks:", response.json())
-        return False
+        self.headers = {"Authorization": f"token {self.token}"}
 
-    def fork_repo(self, repo_url):
-        """Fork the repository."""
-        owner = repo_url.split("/")[-2]
-        repo_name = repo_url.split("/")[-1].replace(".git", "")
-        response = requests.post(f"{self.github_api_url}/repos/{owner}/{repo_name}/forks", headers=self.headers)
-        if response.status_code == 202:
-            return True
-        print("Failed to fork repository:", response.json())
-        return False
+        # Configure git to use token for HTTPS
+        self.git_env = {
+            "GIT_ASKPASS": "echo",
+            "GIT_USERNAME": "git",
+            "GIT_PASSWORD": self.token,
+        }
 
-    def checkout_new_branch(self, branch_name):
-        """Check out a new branch."""
+        # Retry configuration
+        self.retry_config = RetryConfig(
+            max_attempts=3,
+            delay_seconds=1.0,
+            retry_on=[requests.RequestException, IOError],
+        )
+
+    def check_fork_exists(self, owner: str, repo_name: str) -> ToolResponse:
+        """Check if fork exists using GitHub API.
+
+        Args:
+            owner: Repository owner
+            repo_name: Repository name
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
         try:
-            repo = Repo(self.main_git_dir)
-            repo.git.checkout("-b", branch_name)
-            return True
+
+            def check_operation():
+                response = requests.get(
+                    f"{self.github_api_url}/repos/{owner}/{repo_name}",
+                    headers=self.headers,
+                )
+                if response.status_code != 200:
+                    raise ValueError(f"Repository not found: {response.json()}")
+                return True
+
+            exists = with_retry(check_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"exists": exists},
+                metadata={"owner": owner, "repo": repo_name},
+            )
+
         except Exception as e:
-            print(f"Error checking out new branch: {e}")
-            return False
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={
+                    "error_type": e.__class__.__name__,
+                    "owner": owner,
+                    "repo": repo_name,
+                },
+            )
 
-    def commit_and_push(self, file_path=None, message="Update changes"):
-        """Commit and push changes."""
+    def fork_repo(self, repo_url: str) -> ToolResponse:
+        """Fork a repository using GitHub API.
+
+        Args:
+            repo_url: Repository URL to fork
+
+        Returns:
+            ToolResponse with fork details
+        """
         try:
-            repo = Repo(self.main_git_dir)
-            with repo.git.custom_environment(GIT_SSH_COMMAND=self.git_ssh_cmd):
+            # Extract owner and repo from URL
+            match = re.match(r"https://github\.com/([^/]+)/([^/]+)(\.git)?$", repo_url)
+            if not match:
+                raise ValueError(f"Invalid GitHub URL format: {repo_url}")
+            owner, repo = match.groups()[:2]
+
+            def fork_operation():
+                response = requests.post(
+                    f"{self.github_api_url}/repos/{owner}/{repo}/forks",
+                    headers=self.headers,
+                )
+                if response.status_code != 202:
+                    raise ValueError(f"Fork failed: {response.json()}")
+                return response.json()
+
+            result = with_retry(fork_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=result,
+                metadata={"original_url": repo_url},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__, "url": repo_url},
+            )
+
+    def checkout_branch(self, branch_name: str) -> ToolResponse:
+        """Check out a Git branch.
+
+        Args:
+            branch_name: Name of branch to checkout
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
+        try:
+
+            def checkout_operation():
+                repo = Repo(self.git_dir)
+                repo.git.checkout("-b", branch_name)
+                return True
+
+            with_retry(checkout_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"branch": branch_name},
+                metadata={"git_dir": str(self.git_dir)},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__, "branch": branch_name},
+            )
+
+    def commit_and_push(
+        self, message: str, file_path: Optional[str] = None
+    ) -> ToolResponse:
+        """Commit and push changes.
+
+        Args:
+            message: Commit message
+            file_path: Optional specific file to commit
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
+        try:
+
+            def commit_operation():
+                repo = Repo(self.git_dir)
                 if file_path:
-                    if os.path.exists(os.path.join(self.main_git_dir, file_path)):
-                        repo.git.add(file_path)
-                    else:
-                        print(f"Error: {file_path} does not exist.")
-                        return False
+                    file_path_full = self.git_dir / file_path
+                    if not file_path_full.exists():
+                        raise FileNotFoundError(f"File not found: {file_path}")
+                    repo.git.add(file_path)
                 else:
-                    repo.git.add(all=True)
+                    repo.git.add(A=True)
+
                 repo.git.commit(m=message)
                 origin = repo.remotes.origin
-                repo.git.push('--set-upstream', origin, repo.active_branch.name)
+                current_branch = repo.active_branch.name
+                with repo.git.custom_environment(**self.git_env):
+                    repo.git.push("--set-upstream", origin, current_branch)
                 return True
+
+            with_retry(commit_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"message": message},
+                metadata={"git_dir": str(self.git_dir), "file": file_path},
+            )
+
         except Exception as e:
-            print(f"Error committing and pushing changes: {e}")
-            return False
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={
+                    "error_type": e.__class__.__name__,
+                    "message": message,
+                    "file": file_path,
+                },
+            )
 
-    def create_pr(self, original_owner, current_owner, repo_name, base_branch="main", head_branch="main", title="Sync changes"):
-        """Create a pull request to the original repository."""
-        payload = {
-            "title": title,
-            "head": f"{current_owner}:{head_branch}",
-            "base": base_branch
-        }
-        response = requests.post(f"{self.github_api_url}/repos/{original_owner}/{repo_name}/pulls", headers=self.headers, json=payload)
-        if response.status_code == 201:
-            return True
-        print("Failed to create pull request:", response.json())
-        return False
+    def create_pr(
+        self,
+        original_owner: str,
+        current_owner: str,
+        repo_name: str,
+        title: str,
+        base_branch: str = "main",
+        head_branch: str = "main",
+    ) -> ToolResponse:
+        """Create a pull request.
 
-    def sync_fork(self, repo_url, fork_url):
-        """Sync fork with the main branch."""
+        Args:
+            original_owner: Original repository owner
+            current_owner: Current fork owner
+            repo_name: Repository name
+            title: PR title
+            base_branch: Base branch name
+            head_branch: Head branch name
+
+        Returns:
+            ToolResponse with PR details
+        """
         try:
-            # Clone or open the fork repository
-            if not os.path.exists(self.main_git_dir):
-                Repo.clone_from(fork_url, self.main_git_dir)
-            fork_repo = Repo(self.main_git_dir)
-            origin = fork_repo.remotes.origin
-            
-            # Add the original repository as upstream
-            if 'upstream' not in [remote.name for remote in fork_repo.remotes]:
-                fork_repo.create_remote('upstream', repo_url)
-            upstream = fork_repo.remotes.upstream
-            
-            # Fetch the latest changes
-            upstream.fetch()
-            
-            # Checkout and merge the upstream main branch into the fork's main branch
-            fork_repo.git.checkout("main")
-            fork_repo.git.merge("upstream/main")
-            
-            # Push changes to the fork's remote repository
-            origin.push()
-            # Remove origin
-            # fork_repo.delete_remote("upstream")
-            return True
-        except Exception as e:
-            print(f"Error syncing fork: {e}")
-            return False
 
-    def clone_repo(self, repo_url):
-        """Clone the forked repository."""
-        try:
-            Repo.clone_from(repo_url, self.main_git_dir)
-            return True
+            def create_pr_operation():
+                payload = {
+                    "title": title,
+                    "head": f"{current_owner}:{head_branch}",
+                    "base": base_branch,
+                }
+                response = requests.post(
+                    f"{self.github_api_url}/repos/{original_owner}/{repo_name}/pulls",
+                    headers=self.headers,
+                    json=payload,
+                )
+                if response.status_code != 201:
+                    raise ValueError(f"PR creation failed: {response.json()}")
+                return response.json()
+
+            result = with_retry(create_pr_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=result,
+                metadata={
+                    "original_owner": original_owner,
+                    "current_owner": current_owner,
+                    "repo": repo_name,
+                },
+            )
+
         except Exception as e:
-            print(f"Error cloning fork: {e}")
-            return False
-    
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={
+                    "error_type": e.__class__.__name__,
+                    "original_owner": original_owner,
+                    "current_owner": current_owner,
+                    "repo": repo_name,
+                },
+            )
+
+    def sync_fork(self, repo_url: str, fork_url: str) -> ToolResponse:
+        """Sync fork with upstream repository.
+
+        Args:
+            repo_url: Original repository URL
+            fork_url: Fork repository URL
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
+        try:
+
+            def sync_operation():
+                repo = None
+                if not self.git_dir.exists():
+                    repo = Repo.clone_from(fork_url, self.git_dir, env=self.git_env)
+                else:
+                    repo = Repo(self.git_dir)
+
+                origin = repo.remotes.origin
+
+                # Add upstream if needed
+                if "upstream" not in [r.name for r in repo.remotes]:
+                    repo.create_remote("upstream", repo_url)
+                upstream = repo.remotes.upstream
+
+                # Sync with upstream
+                with repo.git.custom_environment(**self.git_env):
+                    upstream.fetch()
+                    repo.git.checkout("main")
+                    repo.git.merge("upstream/main")
+                    origin.push()
+                return True
+
+            with_retry(sync_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"synced": True},
+                metadata={"repo_url": repo_url, "fork_url": fork_url},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={
+                    "error_type": e.__class__.__name__,
+                    "repo_url": repo_url,
+                    "fork_url": fork_url,
+                },
+            )
+
+    def clone_repo(self, repo_url: str) -> ToolResponse:
+        """Clone a repository.
+
+        Args:
+            repo_url: Repository URL to clone
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
+        try:
+
+            def clone_operation():
+                Repo.clone_from(repo_url, self.git_dir, env=self.git_env)
+                return True
+
+            with_retry(clone_operation, config=self.retry_config)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"cloned": True},
+                metadata={"repo_url": repo_url, "git_dir": str(self.git_dir)},
+            )
+
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__, "repo_url": repo_url},
+            )
+
+
+# Register Git tools with ToolImplementations
+def register_git_tools(tool_impl: ToolImplementations) -> None:
+    """Register Git tools with ToolImplementations.
+
+    Args:
+        tool_impl: ToolImplementations instance
+    """
+    git_tools = GitTools(tool_impl.fs_tools.workspace_dir, tool_impl.security_context)
+
+    # Register individual tools
+    tool_impl.register_tool(
+        "git_fork_repo",
+        git_tools.fork_repo,
+        schema={
+            "description": "Fork a GitHub repository",
+            "parameters": {
+                "repo_url": {"type": "string", "description": "Repository URL to fork"}
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_checkout_branch",
+        git_tools.checkout_branch,
+        schema={
+            "description": "Check out a Git branch",
+            "parameters": {
+                "branch_name": {
+                    "type": "string",
+                    "description": "Name of branch to checkout",
+                }
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_commit_push",
+        git_tools.commit_and_push,
+        schema={
+            "description": "Commit and push changes",
+            "parameters": {
+                "message": {"type": "string", "description": "Commit message"},
+                "file_path": {
+                    "type": "string",
+                    "description": "Optional specific file to commit",
+                    "optional": True,
+                },
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_create_pr",
+        git_tools.create_pr,
+        schema={
+            "description": "Create a pull request",
+            "parameters": {
+                "original_owner": {
+                    "type": "string",
+                    "description": "Original repository owner",
+                },
+                "current_owner": {
+                    "type": "string",
+                    "description": "Current fork owner",
+                },
+                "repo_name": {"type": "string", "description": "Repository name"},
+                "title": {"type": "string", "description": "PR title"},
+                "base_branch": {
+                    "type": "string",
+                    "description": "Base branch name",
+                    "default": "main",
+                },
+                "head_branch": {
+                    "type": "string",
+                    "description": "Head branch name",
+                    "default": "main",
+                },
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_sync_fork",
+        git_tools.sync_fork,
+        schema={
+            "description": "Sync fork with upstream repository",
+            "parameters": {
+                "repo_url": {
+                    "type": "string",
+                    "description": "Original repository URL",
+                },
+                "fork_url": {"type": "string", "description": "Fork repository URL"},
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_clone_repo",
+        git_tools.clone_repo,
+        schema={
+            "description": "Clone a repository",
+            "parameters": {
+                "repo_url": {"type": "string", "description": "Repository URL to clone"}
+            },
+        },
+    )

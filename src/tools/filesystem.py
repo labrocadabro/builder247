@@ -7,12 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union, List
 import tempfile
 
-from ..interfaces import (
-    FileSystemTool,
-    ToolResponse,
-    ToolResponseStatus,
-)
-from ..security.core import SecurityContext
+from .types import ToolResponse, ToolResponseStatus
+from ..security.core_context import SecurityContext
 from ..utils.string_sanitizer import sanitize_text
 
 
@@ -22,7 +18,7 @@ class FileSystemError(Exception):
     pass
 
 
-class FileSystemTools(FileSystemTool):
+class FileSystemTools:
     """Tools for filesystem operations."""
 
     def __init__(
@@ -36,11 +32,9 @@ class FileSystemTools(FileSystemTool):
             workspace_dir: Root directory for operations, defaults to cwd
             allowed_paths: Additional allowed paths outside workspace
         """
-        super().__init__(SecurityContext())
-        self.workspace_dir = (
-            Path(workspace_dir).resolve() if workspace_dir else Path.cwd().resolve()
-        )
-        self.allowed_paths = [Path(p).resolve() for p in (allowed_paths or ["/tmp"])]
+        self.security_context = SecurityContext()
+        self.workspace_dir = Path(workspace_dir or os.getcwd())
+        self.allowed_paths = [Path(p) for p in (allowed_paths or [])]
 
     def check_path_security(self, path: Union[str, Path]) -> ToolResponse:
         """Check if path is allowed and safe.

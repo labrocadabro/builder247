@@ -8,8 +8,8 @@ import os
 import re
 from pathlib import Path
 
-from ..interfaces import ToolResponse, ToolResponseStatus
-from ..security.core import SecurityContext
+from .types import ToolResponse, ToolResponseStatus
+from ..security.core_context import SecurityContext
 from ..utils.string_sanitizer import sanitize_text
 
 

@@ -1,12 +1,13 @@
-"""Anthropic API client implementation."""
+"""Anthropic API client."""
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
+import os
 
 import tiktoken
-import anthropic
+from anthropic import Anthropic
 from anthropic.types import MessageParam
 
 from .history_manager import ConversationHistoryManager
@@ -68,18 +69,36 @@ class ConversationWindow:
         self.messages: List[Message] = []
         self._total_tokens = 0
 
-    def add_message(self, message: Message) -> None:
-        """Add message to window if within token limit.
+    def add_message(self, message: Message) -> bool:
+        """Add message to window, pruning old messages if needed to stay within token limit.
 
         Args:
             message: Message to add
-        """
-        if message.token_count > self.max_tokens:
-            return
 
-        if self._total_tokens + message.token_count <= self.max_tokens:
-            self.messages.append(message)
-            self._total_tokens += message.token_count
+        Returns:
+            bool: True if message was added successfully, False if message was too large
+        """
+        # Check if single message exceeds limit
+        if message.token_count > self.max_tokens:
+            logging.warning(
+                f"Message with {message.token_count} tokens exceeds window limit of {self.max_tokens}"
+            )
+            return False
+
+        # If adding would exceed limit, remove old messages until it fits
+        while (
+            self.messages and self._total_tokens + message.token_count > self.max_tokens
+        ):
+            removed = self.messages.pop(0)
+            self._total_tokens -= removed.token_count
+            logging.info(
+                f"Removed old message with {removed.token_count} tokens to make space"
+            )
+
+        # Add the new message
+        self.messages.append(message)
+        self._total_tokens += message.token_count
+        return True
 
     @property
     def total_tokens(self) -> int:
@@ -101,24 +120,48 @@ class AnthropicClient:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: Optional[str] = None,
         model: str = "claude-3-opus-20240229",
         max_tokens: int = 100000,
-        history_dir: Optional[str | Path] = None,
-    ):
-        """Initialize client.
+        history_dir: Optional[Path] = None,
+    ) -> None:
+        """Initialize Anthropic client.
 
         Args:
-            api_key: Anthropic API key
+            api_key: Anthropic API key (uses ANTHROPIC_API_KEY env var if not provided)
             model: Model to use
             max_tokens: Maximum tokens in conversation window
-            history_dir: Optional directory for conversation history
+            history_dir: Optional directory for storing conversation history
         """
-        self.api_key = api_key
+        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        if not self.api_key:
+            raise ValueError("No API key provided")
+
         self.model = model
+        self.client = Anthropic(api_key=self.api_key)
         self.conversation = ConversationWindow(max_tokens=max_tokens)
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.history = ConversationHistoryManager(history_dir) if history_dir else None
+
+        # Initialize history manager if directory provided
+        self.history = None
+        self.conversation_id = None
+        if history_dir:
+            self.history = ConversationHistoryManager(storage_dir=history_dir)
+            # Load existing conversations
+            conversations = self.history.list_conversations()
+            if conversations:
+                # Get most recent conversation
+                self.conversation_id = conversations[0]["id"]
+                # Load messages into conversation window
+                messages = self.history.get_messages(self.conversation_id)
+                for msg in messages:
+                    self.conversation.add_message(
+                        Message(
+                            role=msg["role"],
+                            content=msg["content"],
+                            token_count=msg["token_count"],
+                        )
+                    )
+
         self.logger = logging.getLogger(__name__)
 
     def send_message(
@@ -162,8 +205,12 @@ class AnthropicClient:
         self.conversation.add_message(assistant_msg)
 
         if self.history:
-            conversation_id = self.history.create_conversation()
-            self.history.add_message(conversation_id, "user", message)
-            self.history.add_message(conversation_id, "assistant", response_text)
+            # Create conversation ID if this is the first message
+            if not self.conversation_id:
+                self.conversation_id = self.history.create_conversation()
+
+            # Add messages to history
+            self.history.add_message(self.conversation_id, "user", message)
+            self.history.add_message(self.conversation_id, "assistant", response_text)
 
         return response_text, tool_calls

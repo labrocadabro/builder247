@@ -1,87 +1,25 @@
 """Unit tests for filesystem operations."""
 
 import os
-import tempfile
 import pytest
 import stat
 from pathlib import Path
-from src.interfaces import ToolResponseStatus
 
+from src.tools.types import ToolResponseStatus
 from src.tools.filesystem import FileSystemTools
-from src.security.core import SecurityContext
-
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def security_context():
-    """Create a security context for testing."""
-    return SecurityContext()
+from tests.utils.fixtures import (
+    temp_dir,  # Used in fs_tools and tests
+    restricted_dir,  # Used in test_read_from_restricted_dir
+    read_only_dir,  # Used in test_create_file_in_read_only_dir
+    restricted_file,  # Used in test_check_file_readable_no_permission
+    read_only_file,  # Used in test_write_to_readonly_file
+)
 
 
 @pytest.fixture
 def fs_tools(temp_dir):
     """Create FileSystemTools instance."""
     return FileSystemTools(workspace_dir=temp_dir, allowed_paths=["/tmp", temp_dir])
-
-
-@pytest.fixture
-def restricted_dir(temp_dir):
-    """Create a directory with restricted permissions for testing.
-
-    This creates a directory where:
-    - Owner has full permissions (rwx)
-    - Group and others have no permissions
-    - Any files created inside also have restricted permissions
-    """
-    with tempfile.TemporaryDirectory(dir=temp_dir) as restricted_path:
-        path = Path(restricted_path)
-        os.chmod(path, 0o700)  # rwx for owner only
-        yield path
-        # Cleanup is handled by TemporaryDirectory
-
-
-@pytest.fixture
-def read_only_dir(temp_dir):
-    """Create a read-only directory for testing."""
-    with tempfile.TemporaryDirectory(dir=temp_dir) as readonly_path:
-        path = Path(readonly_path)
-        os.chmod(
-            path,
-            stat.S_IRUSR
-            | stat.S_IXUSR
-            | stat.S_IRGRP
-            | stat.S_IXGRP
-            | stat.S_IROTH
-            | stat.S_IXOTH,
-        )  # r-x
-        yield path
-        # Cleanup is handled by TemporaryDirectory
-
-
-@pytest.fixture
-def restricted_file(restricted_dir):
-    """Create a file with restricted permissions inside a restricted directory."""
-    with tempfile.NamedTemporaryFile(dir=restricted_dir, delete=False) as tf:
-        tf.write(b"test content")
-        path = Path(tf.name)
-        os.chmod(path, 0o600)  # rw for owner only
-        yield path
-        # Cleanup handled by restricted_dir's TemporaryDirectory
-
-
-@pytest.fixture
-def read_only_file(temp_dir):
-    """Create a read-only file for testing."""
-    test_file = temp_dir / "test.txt"
-    test_file.write_text("test content")
-    test_file.chmod(0o444)  # Read-only for all
-    return test_file
 
 
 def test_check_path_security_workspace(fs_tools, temp_dir):

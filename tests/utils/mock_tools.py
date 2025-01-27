@@ -5,15 +5,14 @@ Testing infrastructure for tools.
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
+from unittest.mock import patch
+import os
 
-from .interfaces import (
-    SecurityContext,
-    FileSystemTool,
-    CommandTool,
-    ToolResponse,
-    ToolResponseStatus,
-)
+from src.tools.types import ToolResponse, ToolResponseStatus
+from src.security.core_context import SecurityContext
+from src.tools.filesystem import FileSystemTools
+from src.tools.command import CommandExecutor
 
 
 class MockSecurityContext(SecurityContext):
@@ -26,11 +25,29 @@ class MockSecurityContext(SecurityContext):
             temp_dir: Optional temporary directory for test files
         """
         self.temp_dir = temp_dir or Path(tempfile.mkdtemp())
-        super().__init__(
-            allowed_paths=[self.temp_dir, Path("/tmp")],
-            allowed_env_vars=["PATH", "HOME", "USER", "TEMP", "TMP"],
-            restricted_commands=["rm -rf", "sudo", ">", "dd"],
-        )
+
+        # Mock Dockerfile loading to get environment variables
+        with patch(
+            "src.security.environment_protection.load_dockerfile_vars"
+        ) as mock_vars:
+            mock_vars.return_value = {"DOCKER_API_KEY", "DOCKER_SECRET"}
+            with patch(
+                "src.security.resource_constraints.load_dockerfile_limits"
+            ) as mock_limits:
+                mock_limits.return_value = {}
+
+                # Initialize parent class
+                super().__init__()
+
+    def _load_protected_vars(self) -> Set[str]:
+        """Override to return mocked protected variables."""
+        return {"DOCKER_API_KEY", "DOCKER_SECRET", "GITHUB_TOKEN"}
+
+    def get_environment(self) -> Dict[str, str]:
+        """Get sanitized environment variables."""
+        env = os.environ.copy()
+        env["GITHUB_TOKEN"] = "mock_github_token"  # Add mock token for testing
+        return env
 
     def cleanup(self) -> None:
         """Clean up temporary test directory."""
@@ -66,16 +83,16 @@ class MockSecurityContext(SecurityContext):
         return path
 
 
-class MockFileSystem(FileSystemTool):
+class MockFileSystem(FileSystemTools):
     """In-memory filesystem for testing."""
 
-    def __init__(self, security_context: Optional[SecurityContext] = None):
+    def __init__(self):
         """Initialize mock filesystem.
 
         Args:
             security_context: Optional security context to use
         """
-        super().__init__(security_context or MockSecurityContext())
+        super().__init__(workspace_dir=None, security_context=MockSecurityContext())
         self.files: Dict[Path, str] = {}
         self.permissions: Dict[Path, int] = {}
         self.directories: List[Path] = []
@@ -157,16 +174,16 @@ class MockFileSystem(FileSystemTool):
         self.permissions[path] = mode
 
 
-class MockCommandExecutor(CommandTool):
+class MockCommandExecutor(CommandExecutor):
     """Mock command executor for testing."""
 
-    def __init__(self, security_context: Optional[SecurityContext] = None):
+    def __init__(self):
         """Initialize mock command executor.
 
         Args:
             security_context: Optional security context to use
         """
-        super().__init__(security_context or MockSecurityContext())
+        super().__init__(security_context=MockSecurityContext())
         self.commands: List[str] = []
         self.responses: Dict[str, ToolResponse] = {}
         self.default_response = ToolResponse(

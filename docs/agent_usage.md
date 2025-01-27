@@ -15,13 +15,21 @@ pip install -r requirements.txt
 
 The agent is configured using the `AgentConfig` class with the following parameters:
 
+Required:
+
 - `workspace_dir` (Path): Directory containing your codebase
-- `model` (str, optional): Claude model to use, defaults to "claude-3-opus-20240229"
-- `max_retries` (int, optional): Maximum retry attempts for failing tests, defaults to 3
-- `log_file` (str, optional): Path to log file for agent operations
-- `api_key` (str, optional): Anthropic API key (will use ANTHROPIC_API_KEY env var if not provided)
-- `max_tokens` (int, optional): Maximum tokens in conversation window, defaults to 100000
-- `history_dir` (Path, optional): Directory for storing conversation history
+
+Optional:
+
+- `model` (str): Claude model to use, defaults to "claude-3-opus-20240229"
+- `max_retries` (int): Maximum retry attempts for failing operations, defaults to 3
+- `log_file` (str): Path to log file for agent operations
+- `api_key` (str): Anthropic API key (will use ANTHROPIC_API_KEY env var if not provided)
+- `max_tokens` (int): Maximum tokens in conversation window, defaults to 100000
+- `history_dir` (Path): Directory for storing conversation history
+- `allowed_paths` (List[Path]): List of paths that can be accessed, defaults to workspace_dir
+- `allowed_env_vars` (List[str]): List of environment variables that can be accessed
+- `restricted_commands` (List[str]): List of commands that are not allowed
 
 Example configuration:
 
@@ -35,7 +43,10 @@ config = AgentConfig(
     max_retries=3,
     log_file="agent.log",
     max_tokens=100000,
-    history_dir=Path("./history")
+    history_dir=Path("./history"),
+    allowed_paths=[Path("./my_project"), Path("/tmp")],
+    allowed_env_vars=["PATH", "HOME", "USER"],
+    restricted_commands=["rm -rf", "sudo", ">", "dd"]
 )
 agent = ImplementationAgent(config)
 ```
@@ -58,7 +69,7 @@ The agent uses several key components:
 
 3. **SecurityContext**: Manages security constraints and protected resources
 
-   - Controls resource limits
+   - Controls allowed paths and commands
    - Protects sensitive environment variables
    - Sanitizes command output
 

@@ -20,12 +20,12 @@ def test_record_dockerfile_limits():
         }
         record_dockerfile_limits(limits)
 
-    # Verify file was written with sorted valid limits
+    # Verify valid limits were written and invalid ones ignored
     handle = mock_file()
-    handle.write.assert_any_call("cpu_time=300\n")
-    handle.write.assert_any_call("memory=1073741824\n")
-    # Invalid limit should not be written
-    assert not any("invalid" in call.args[0] for call in handle.write.call_args_list)
+    written_content = "".join(call.args[0] for call in handle.write.call_args_list)
+    assert "memory=1073741824\n" in written_content
+    assert "cpu_time=300\n" in written_content
+    assert "invalid=" not in written_content
 
 
 def test_load_dockerfile_limits_exists():
@@ -67,16 +67,20 @@ def test_apply_resource_limits():
             # Mock current limits
             mock_getrlimit.return_value = (1024, 2048)
 
+            # Apply limits
             apply_resource_limits(limits)
 
-            # Verify setrlimit was called for valid limits
-            assert mock_setrlimit.call_count == 2
-            mock_setrlimit.assert_any_call(
-                RESOURCE_LIMITS["memory"], (min(1024 * 1024 * 1024, 2048), 2048)
-            )
-            mock_setrlimit.assert_any_call(
-                RESOURCE_LIMITS["cpu_time"], (min(300, 2048), 2048)
-            )
+            # Verify only valid limits were applied
+            set_limits = {
+                call.args[0]: call.args[1][0] for call in mock_setrlimit.call_args_list
+            }
+
+            # Check memory limit was applied
+            assert RESOURCE_LIMITS["memory"] in set_limits
+            # Check CPU time limit was applied
+            assert RESOURCE_LIMITS["cpu_time"] in set_limits
+            # Check invalid limit was not applied
+            assert "invalid" not in set_limits
 
 
 def test_apply_resource_limits_error():

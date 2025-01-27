@@ -11,12 +11,14 @@ def test_record_dockerfile_vars():
     """Test recording protected environment variables."""
     mock_file = mock_open()
     with patch("builtins.open", mock_file):
-        record_dockerfile_vars({"API_KEY", "SECRET_TOKEN"})
+        vars_to_record = {"API_KEY", "SECRET_TOKEN"}
+        record_dockerfile_vars(vars_to_record)
 
-    # Verify file was written with sorted vars
+    # Verify all variables were written
     handle = mock_file()
-    handle.write.assert_any_call("API_KEY\n")
-    handle.write.assert_any_call("SECRET_TOKEN\n")
+    written_content = "".join(call.args[0] for call in handle.write.call_args_list)
+    for var in vars_to_record:
+        assert f"{var}\n" in written_content
 
 
 def test_load_dockerfile_vars_exists():

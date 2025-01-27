@@ -4,7 +4,7 @@ import logging
 import pytest
 
 from src.utils.retry import RetryConfig, with_retry
-from src.interfaces import ToolResponse, ToolResponseStatus
+from src.tools.types import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture

@@ -8,33 +8,48 @@ import re
 
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
-from ..security.core import SecurityContext
-from ..interfaces import ToolResponse, ToolResponseStatus
+from ..security.core_context import SecurityContext
+from .types import ToolResponse, ToolResponseStatus
 
 logger = logging.getLogger(__name__)
 
 
 class ToolImplementations:
-    """Tool implementations for Anthropic CLI."""
+    """Tool implementations with security context."""
 
     def __init__(
         self,
         workspace_dir: Optional[Path] = None,
         allowed_paths: Optional[List[Path]] = None,
-        additional_protected_patterns: Optional[List[str]] = None,
-        max_output_size: Optional[int] = None,
+        allowed_env_vars: Optional[List[str]] = None,
+        restricted_commands: Optional[List[str]] = None,
     ) -> None:
-        """Initialize ToolImplementations with security context and tools."""
-        self.security_context = (
-            SecurityContext()
-        )  # SecurityContext doesn't handle paths
+        """Initialize ToolImplementations with security context and tools.
 
-        self.tools: Dict[str, Callable] = {}
-        self.tool_metadata: Dict[str, Dict] = {}
-        self.command_executor = CommandExecutor(self.security_context)
+        Args:
+            workspace_dir: Base directory for file operations
+            allowed_paths: List of paths that can be accessed
+            allowed_env_vars: List of environment variables that can be accessed
+            restricted_commands: List of commands that are not allowed
+        """
+        # Initialize security context with provided settings
+        self.security_context = SecurityContext()
+
+        # Set security constraints
+        if allowed_env_vars is not None:
+            self.security_context.allowed_env_vars = allowed_env_vars
+        if restricted_commands is not None:
+            self.security_context.restricted_commands = restricted_commands
+
+        # Initialize tools with security context
         self.fs_tools = FileSystemTools(
-            workspace_dir=workspace_dir, allowed_paths=allowed_paths
+            workspace_dir=workspace_dir,
+            allowed_paths=allowed_paths,
         )
+        self.fs_tools.security_context = self.security_context
+
+        self.cmd_executor = CommandExecutor(security_context=self.security_context)
+        self.registered_tools = {}
 
     def register_tool(
         self,
@@ -51,11 +66,11 @@ class ToolImplementations:
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*$", name):
             raise ValueError(f"Invalid tool name: {name}")
 
-        if name in self.tools:
+        if name in self.registered_tools:
             raise ValueError("Tool already registered")
 
-        self.tools[name] = func
-        self.tool_metadata[name] = {
+        self.registered_tools[name] = {
+            "func": func,
             "schema": schema,
             "version": version,
             "dependencies": dependencies or [],
@@ -78,14 +93,14 @@ class ToolImplementations:
             )
 
         # Check if tool exists
-        if tool_name not in self.tools:
+        if tool_name not in self.registered_tools:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=f"Unknown tool: {tool_name}",
                 metadata={"error_type": "ValueError"},
             )
 
-        func = self.tools[tool_name]
+        func = self.registered_tools[tool_name]["func"]
         sig = inspect.signature(func)
         params = params or {}
 
@@ -148,7 +163,7 @@ class ToolImplementations:
                 - error: stderr for failed commands
                 - metadata: full output dict with stdout, stderr, exit_code
         """
-        result = self.command_executor._execute(command, env=env)
+        result = self.cmd_executor._execute(command, env=env)
         return ToolResponse(
             status=(
                 ToolResponseStatus.SUCCESS
@@ -177,7 +192,7 @@ class ToolImplementations:
                 - error: stderr for failed commands
                 - metadata: full output dict with stdout, stderr, exit_code
         """
-        result = self.command_executor._execute_piped(commands)
+        result = self.cmd_executor._execute_piped(commands)
         return ToolResponse(
             status=(
                 ToolResponseStatus.SUCCESS
@@ -216,17 +231,12 @@ class ToolImplementations:
                 metadata={"error_type": e.__class__.__name__},
             )
 
-    @property
-    def registered_tools(self) -> List[str]:
-        """Get list of registered tool names."""
-        return list(self.tools.keys())
-
     def list_tools(self) -> Dict[str, Dict[str, Any]]:
         """List all registered tools with their metadata."""
         tool_list = {}
-        for name, func in self.tools.items():
-            sig = inspect.signature(func)
-            doc = inspect.getdoc(func) or ""
+        for name, tool_info in self.registered_tools.items():
+            sig = tool_info["signature"]
+            doc = inspect.getdoc(tool_info["func"]) or ""
 
             # Get parameters info
             params = {}

@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 
 from .client import AnthropicClient
 from .tools import ToolImplementations
-from .interfaces import ToolResponseStatus, ToolResponse
+from src.tools.types import ToolResponseStatus, ToolResponse
 from .utils.monitoring import ToolLogger
 from .utils.retry import with_retry, RetryConfig
 
@@ -23,6 +23,9 @@ class AgentConfig:
     api_key: Optional[str] = None  # Will use ANTHROPIC_API_KEY env var if not provided
     max_tokens: int = 100000
     history_dir: Optional[str | Path] = None
+    allowed_paths: Optional[List[Path]] = None
+    allowed_env_vars: Optional[List[str]] = None
+    restricted_commands: Optional[List[str]] = None
 
 
 class ImplementationAgent:
@@ -37,8 +40,13 @@ class ImplementationAgent:
         self.config = config
         self.logger = ToolLogger(config.log_file) if config.log_file else ToolLogger()
 
-        # Initialize tools with workspace directory
-        self.tools = ToolImplementations(workspace_dir=config.workspace_dir)
+        # Initialize tools with security settings
+        self.tools = ToolImplementations(
+            workspace_dir=config.workspace_dir,
+            allowed_paths=config.allowed_paths,
+            allowed_env_vars=config.allowed_env_vars,
+            restricted_commands=config.restricted_commands,
+        )
 
         # Initialize client for AI interactions
         api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")

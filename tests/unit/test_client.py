@@ -4,17 +4,19 @@ import pytest
 import sqlite3
 from unittest.mock import Mock, patch
 
-from src.client import AnthropicClient, Message
+from src.client import AnthropicClient, Message, ConversationWindow
 
 
 @pytest.fixture
 def mock_anthropic():
     """Mock Anthropic API client."""
-    with patch("anthropic.Anthropic") as mock:
+    with patch("src.client.Anthropic") as mock:
         client = Mock()
         mock.return_value = client
         response = Mock()
         response.content = [{"type": "text", "text": "Test response"}]
+        response.model = "claude-3-opus-20240229"
+        response.role = "assistant"
         client.messages.create.return_value = response
         yield client
 
@@ -47,7 +49,11 @@ def test_send_message(client, mock_anthropic):
 
     assert response_text == "Test response"
     assert tool_calls == []
-    mock_anthropic.messages.create.assert_called_once()
+    mock_anthropic.messages.create.assert_called_once_with(
+        model=client.model,
+        messages=[{"role": "user", "content": "Test message"}],
+        max_tokens=client.conversation.max_tokens,
+    )
     assert len(client.conversation.messages) == 2  # User message + response
 
 
@@ -61,8 +67,15 @@ def test_send_message_with_history(client, mock_anthropic):
 
     assert response_text == "Test response"
     assert tool_calls == []
-    call_args = mock_anthropic.messages.create.call_args[1]
-    assert len(call_args["messages"]) == 3  # Previous messages + new message
+    mock_anthropic.messages.create.assert_called_once_with(
+        model=client.model,
+        messages=[
+            {"role": "user", "content": "Previous message", "token_count": 2},
+            {"role": "assistant", "content": "Previous response", "token_count": 2},
+            {"role": "user", "content": "Test message"},
+        ],
+        max_tokens=client.conversation.max_tokens,
+    )
 
 
 def test_send_message_without_history(client, mock_anthropic):
@@ -75,25 +88,65 @@ def test_send_message_without_history(client, mock_anthropic):
 
     assert response_text == "Test response"
     assert tool_calls == []
-    call_args = mock_anthropic.messages.create.call_args[1]
-    assert len(call_args["messages"]) == 1  # Only new message
+    mock_anthropic.messages.create.assert_called_once_with(
+        model=client.model,
+        messages=[{"role": "user", "content": "Test message"}],
+        max_tokens=client.conversation.max_tokens,
+    )
 
 
-def test_conversation_window_token_limit(client):
+def test_conversation_window_token_limit():
     """Test conversation window token limit handling."""
-    # Add message that exceeds token limit
-    large_message = Message(
-        "user", "x" * 100000, token_count=100000
-    )  # Force large token count
-    client.conversation.add_message(large_message)
+    window = ConversationWindow(max_tokens=100)
 
-    assert len(client.conversation.messages) == 0  # Message should be skipped
+    # Test adding message that's too large
+    large_msg = Message("user", "x" * 1000)  # Force large token count
+    assert not window.add_message(large_msg)
+    assert len(window.messages) == 0
 
-    # Add normal message
-    normal_message = Message("user", "Normal message")
-    client.conversation.add_message(normal_message)
+    # Test adding messages until full
+    msg1 = Message("user", "First", token_count=40)
+    msg2 = Message("assistant", "Second", token_count=40)
+    msg3 = Message("user", "Third", token_count=40)
 
-    assert len(client.conversation.messages) == 1  # Normal message should be added
+    assert window.add_message(msg1)
+    assert len(window.messages) == 1
+    assert window.total_tokens == 40
+
+    assert window.add_message(msg2)
+    assert len(window.messages) == 2
+    assert window.total_tokens == 80
+
+    # This should remove msg1 to make room for msg3
+    assert window.add_message(msg3)
+    assert len(window.messages) == 2
+    assert window.total_tokens == 80
+    assert window.messages[0].content == "Second"
+    assert window.messages[1].content == "Third"
+
+
+def test_conversation_history_retrieval(client, mock_anthropic):
+    """Test conversation history retrieval."""
+    # Send some messages
+    client.send_message("First message")
+    client.send_message("Second message")
+
+    # Create new client instance to verify persistence
+    new_client = AnthropicClient(
+        api_key="test-key",
+        model="test-model",
+        max_tokens=50000,
+        history_dir=client.history.storage_dir,
+    )
+
+    # Verify history is available
+    assert len(new_client.conversation.messages) > 0
+    assert any(
+        "First message" in msg.content for msg in new_client.conversation.messages
+    )
+    assert any(
+        "Second message" in msg.content for msg in new_client.conversation.messages
+    )
 
 
 def test_conversation_history_persistence(client, tmp_path):

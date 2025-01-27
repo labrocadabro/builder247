@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src.tools.implementations import ToolImplementations
-from src.interfaces import ToolResponse, ToolResponseStatus
+from src.tools.types import ToolResponse, ToolResponseStatus
 
 
 @pytest.fixture
@@ -38,7 +38,12 @@ def mock_dockerfile_limits():
 @pytest.fixture
 def tools(workspace_dir, mock_dockerfile_vars, mock_dockerfile_limits):
     """Create ToolImplementations instance."""
-    return ToolImplementations(workspace_dir=workspace_dir)
+    return ToolImplementations(
+        workspace_dir=workspace_dir,
+        allowed_paths=[workspace_dir],
+        allowed_env_vars=["PATH", "HOME", "USER"],
+        restricted_commands=["rm -rf", "sudo", ">", "dd"],
+    )
 
 
 def test_init_with_workspace(workspace_dir):
@@ -49,12 +54,23 @@ def test_init_with_workspace(workspace_dir):
 
 def test_init_with_allowed_paths(workspace_dir):
     """Test initialization with allowed paths."""
-    allowed_paths = ["/tmp", "/var/log"]
+    allowed_paths = [Path("/tmp"), Path("/var/log")]
     tools = ToolImplementations(
-        workspace_dir=workspace_dir, allowed_paths=[Path(p) for p in allowed_paths]
+        workspace_dir=workspace_dir, allowed_paths=allowed_paths
     )
     assert all(isinstance(p, Path) for p in tools.fs_tools.allowed_paths)
     assert len(tools.fs_tools.allowed_paths) == len(allowed_paths)
+
+
+def test_init_with_security_settings(workspace_dir):
+    """Test initialization with security settings."""
+    tools = ToolImplementations(
+        workspace_dir=workspace_dir,
+        allowed_env_vars=["TEST_VAR"],
+        restricted_commands=["dangerous_cmd"],
+    )
+    assert "TEST_VAR" in tools.security_context.allowed_env_vars
+    assert "dangerous_cmd" in tools.security_context.restricted_commands
 
 
 def test_register_tool(tools):
