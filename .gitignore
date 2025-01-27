@@ -46,3 +46,6 @@ logs/*
 htmlcov/
 conversations/
 
+# Other cache
+main_git_dir/**.*
+id_rsa
