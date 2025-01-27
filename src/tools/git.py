@@ -6,7 +6,7 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-
+# https://gitpython.readthedocs.io/en/stable/tutorial.html
 class GitAutomation:
     def __init__(self, git_dir):
         self.token = os.getenv("GITHUB_TOKEN")
