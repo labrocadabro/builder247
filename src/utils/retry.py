@@ -219,12 +219,15 @@ class CircuitBreaker:
             return True
 
         # Check if enough time has passed to try reset
-        if time.time() - self.last_failure_time > self.reset_timeout:
+        if (
+            self.state == "open"
+            and time.time() - self.last_failure_time > self.reset_timeout
+        ):
             self.state = "half-open"
             self.logger.info("Circuit breaker entering half-open state")
             return True
 
-        return False
+        return self.state == "half-open"
 
 
 class CircuitBreakerOpen(Exception):

@@ -151,15 +151,21 @@ class ToolLogger:
             log_file: Optional log file path
         """
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)  # Set logger level to INFO
 
         if log_file:
             handler = logging.FileHandler(log_file)
+            handler.setLevel(logging.INFO)  # Set handler level to INFO
             handler.setFormatter(
                 logging.Formatter(
                     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
                 )
             )
             self.logger.addHandler(handler)
+
+            # Prevent duplicate logs by removing other handlers
+            for other_handler in self.logger.handlers[:-1]:
+                self.logger.removeHandler(other_handler)
 
     def log_operation(
         self,

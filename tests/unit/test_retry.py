@@ -242,6 +242,7 @@ def test_circuit_breaker_close_after_success(circuit_breaker):
         circuit_breaker.record_failure()
 
     time.sleep(circuit_breaker.reset_timeout + 0.1)
+    assert circuit_breaker.can_execute()
     assert circuit_breaker.state == "half-open"
 
     circuit_breaker.record_success()
