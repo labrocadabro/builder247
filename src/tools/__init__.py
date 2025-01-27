@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
+from .implementations import ToolImplementations
 from ..interfaces import ToolResponse, ToolResponseStatus
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "FileSystemTools",
     "ToolResponse",
     "ToolResponseStatus",
+    "ToolImplementations",
 ]
 
 TOOL_DEFINITIONS: List[Dict] = [

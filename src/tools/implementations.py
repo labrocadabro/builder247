@@ -6,8 +6,8 @@ import inspect
 import logging
 import re
 
-from ..tools.command import CommandExecutor
-from ..tools.filesystem import FileSystemTools
+from .command import CommandExecutor
+from .filesystem import FileSystemTools
 from ..security.core import SecurityContext
 from ..interfaces import ToolResponse, ToolResponseStatus
 

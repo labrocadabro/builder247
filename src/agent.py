@@ -1,14 +1,15 @@
 """Core implementation of the AI agent."""
 
-import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from .client import AnthropicClient
-from .utils.command import CommandExecutor
+from .tools import ToolImplementations
+from .interfaces import ToolResponseStatus, ToolResponse
 from .utils.monitoring import ToolLogger
-from .utils.retry import RetryHandler, RetryConfig
+from .utils.retry import with_retry, RetryConfig
 
 
 @dataclass
@@ -19,6 +20,9 @@ class AgentConfig:
     model: str = "claude-3-opus-20240229"
     max_retries: int = 3
     log_file: Optional[str] = None
+    api_key: Optional[str] = None  # Will use ANTHROPIC_API_KEY env var if not provided
+    max_tokens: int = 100000
+    history_dir: Optional[str | Path] = None
 
 
 class ImplementationAgent:
@@ -31,16 +35,26 @@ class ImplementationAgent:
             config: Agent configuration
         """
         self.config = config
-        self.logger = (
-            ToolLogger(config.log_file)
-            if config.log_file
-            else logging.getLogger(__name__)
-        )
+        self.logger = ToolLogger(config.log_file) if config.log_file else ToolLogger()
+
+        # Initialize tools with workspace directory
+        self.tools = ToolImplementations(workspace_dir=config.workspace_dir)
+
+        # Initialize client for AI interactions
+        api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "Anthropic API key must be provided in config or environment"
+            )
+
         self.client = AnthropicClient(
-            workspace_dir=config.workspace_dir, model=config.model
+            api_key=api_key,
+            model=config.model,
+            max_tokens=config.max_tokens,
+            history_dir=config.history_dir,
         )
-        self.cmd = CommandExecutor()
-        self.retry = RetryHandler(RetryConfig(max_attempts=config.max_retries))
+
+        self.retry_config = RetryConfig(max_attempts=config.max_retries)
 
     def implement_todo(self, todo_item: str, acceptance_criteria: List[str]) -> bool:
         """Implement a todo item according to acceptance criteria.
@@ -58,42 +72,94 @@ class ImplementationAgent:
                 "analyze_todo", {"todo": todo_item, "criteria": acceptance_criteria}
             )
 
-            # 2. Plan the implementation
-            plan = self.client.send_message(
-                f"Plan the implementation of this todo item:\n{todo_item}\n\n"
+            # 2. Plan and implement the changes
+            message = (
+                f"Plan and implement this todo item:\n{todo_item}\n\n"
                 f"Acceptance Criteria:\n"
                 + "\n".join(f"- {c}" for c in acceptance_criteria)
             )
 
-            # 3. Implement the changes
-            self.logger.log_operation("implement_changes", {"plan": plan})
+            while True:
+                # Send message and get response with any tool calls
+                response_text, tool_calls = self.client.send_message(message)
 
-            # 4. Generate tests
-            self.logger.log_operation("generate_tests", {"todo": todo_item})
+                # If no tool calls, we're done with this step
+                if not tool_calls:
+                    break
 
-            # 5. Run tests and iterate until passing
-            test_result = self._run_tests()
-            attempts = 0
+                # Execute each tool call and collect results
+                tool_results = []
+                for tool_call in tool_calls:
+                    result = self._execute_tool_safely(tool_call)
+                    tool_results.append(result)
 
-            while not test_result and attempts < self.config.max_retries:
-                attempts += 1
-                self.logger.log_operation(
-                    "fix_tests", {"attempt": attempts, "todo": todo_item}
-                )
-                # Ask the model to fix failing tests
-                test_result = self._run_tests()
+                # Send tool results back to continue the conversation
+                message = f"Tool execution results:\n{tool_results}\n\nPlease continue with the implementation."
 
-            return test_result
+            # 3. Run tests and fix until passing
+            if self._run_tests_with_retry():
+                self.logger.log_operation("implementation_success", {"todo": todo_item})
+                return True
 
-        except Exception as e:
-            self.logger.log_error("implement_todo", str(e), {"todo": todo_item})
+            self.logger.log_error(
+                "implementation_failed",
+                "Tests failed after maximum retries",
+                {"todo": todo_item},
+            )
             return False
 
-    def _run_tests(self) -> bool:
-        """Run tests and return True if all pass."""
+        except Exception as e:
+            self.logger.log_error(
+                "implement_todo",
+                str(e),
+                {"todo": todo_item, "criteria": acceptance_criteria},
+            )
+            return False
+
+    def _execute_tool_safely(self, tool_call: Dict[str, Any]) -> ToolResponse:
+        """Execute a tool with retries and logging.
+
+        Args:
+            tool_call: Dictionary containing tool name and parameters
+
+        Returns:
+            Result of tool execution
+        """
+        self.logger.log_operation(
+            "execute_tool", {"name": tool_call["name"], "args": tool_call["parameters"]}
+        )
+
+        def execute():
+            return self.tools.execute_tool(
+                tool_call["name"],
+                tool_call["parameters"],
+            )
+
+        return with_retry(execute, config=self.retry_config, logger=self.logger.logger)
+
+    def _run_tests_with_retry(self) -> bool:
+        """Run tests with retries.
+
+        Returns:
+            True if tests pass, False otherwise
+        """
+
+        def run_tests():
+            return self.tools.run_command("python -m pytest")
+
         try:
-            result = self.cmd.run_command("python -m pytest")
-            return result["exit_code"] == 0
+            result = with_retry(
+                run_tests, config=self.retry_config, logger=self.logger.logger
+            )
+            return result.status == ToolResponseStatus.SUCCESS
         except Exception as e:
             self.logger.log_error("run_tests", str(e))
             return False
+
+    def run_tests(self) -> bool:
+        """Run tests with retries.
+
+        Returns:
+            True if tests pass, False otherwise
+        """
+        return self._run_tests_with_retry()

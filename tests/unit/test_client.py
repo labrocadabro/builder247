@@ -1,204 +1,112 @@
 """Unit tests for Anthropic client."""
 
-from unittest.mock import Mock, patch
 import pytest
-from pathlib import Path
+import sqlite3
+from unittest.mock import Mock, patch
 
-from src.client import (
-    Message,
-    ConversationWindow,
-    AnthropicClient,
-)
-from src.interfaces import ToolResponseStatus
+from src.client import AnthropicClient, Message
 
 
 @pytest.fixture
 def mock_anthropic():
-    """Create a mock Anthropic client."""
+    """Mock Anthropic API client."""
     with patch("anthropic.Anthropic") as mock:
-        mock_client = Mock()
-        mock.return_value = mock_client
-        mock_client.messages.create.return_value = Mock(
-            content=[{"text": "Test response"}]
-        )
-        yield mock_client
+        client = Mock()
+        mock.return_value = client
+        response = Mock()
+        response.content = [{"type": "text", "text": "Test response"}]
+        client.messages.create.return_value = response
+        yield client
 
 
 @pytest.fixture
-def mock_tools():
-    """Create mock tool implementations."""
-    mock_tools = Mock()
-    mock_tools.execute_tool.return_value = Mock(
-        status=ToolResponseStatus.SUCCESS,
-        data="test result",
-        error=None,
+def client(mock_anthropic, tmp_path):
+    """Create client instance with mocked dependencies."""
+    storage_dir = tmp_path / "conversations"
+    storage_dir.mkdir()
+    return AnthropicClient(
+        api_key="test-key",
+        model="test-model",
+        max_tokens=50000,
+        history_dir=storage_dir,
     )
-    return mock_tools
 
 
-@pytest.fixture
-def client(mock_anthropic, mock_tools, tmp_path):
-    """Create an Anthropic client with mocked dependencies."""
-    with patch("src.client.ToolImplementations", return_value=mock_tools):
-        client = AnthropicClient(
-            api_key="test-key",
-            model="claude-3-opus-20240229",
-            workspace_dir=tmp_path,
-            history_dir=tmp_path / "history",
-        )
-        return client
+def test_client_init(client, tmp_path):
+    """Test client initialization."""
+    assert client.api_key == "test-key"
+    assert client.model == "test-model"
+    assert client.conversation.max_tokens == 50000
+    assert client.history is not None
+    assert client.history.storage_dir == tmp_path / "conversations"
 
 
-@pytest.fixture
-def conversation_window():
-    """Create a conversation window."""
-    return ConversationWindow(max_tokens=1000)
+def test_send_message(client, mock_anthropic):
+    """Test sending message to model."""
+    response_text, tool_calls = client.send_message("Test message")
 
-
-def test_message_init():
-    """Test Message initialization."""
-    message = Message(role="user", content="Test message")
-    assert message.role == "user"
-    assert message.content == "Test message"
-    assert message.token_count > 0
-
-
-def test_message_from_dict():
-    """Test creating Message from dictionary."""
-    data = {"role": "assistant", "content": "Test response", "token_count": 100}
-    message = Message.from_dict(data)
-    assert message.role == "assistant"
-    assert message.content == "Test response"
-    assert message.token_count == 100
-
-
-def test_message_to_dict():
-    """Test converting Message to dictionary."""
-    message = Message(role="user", content="Test message")
-    data = message.to_dict()
-    assert data["role"] == "user"
-    assert data["content"] == "Test message"
-    assert "token_count" in data
-
-
-def test_conversation_window_init():
-    """Test ConversationWindow initialization."""
-    window = ConversationWindow(max_tokens=1000)
-    assert window.max_tokens == 1000
-    assert len(window.messages) == 0
-    assert window.total_tokens == 0
-
-
-def test_conversation_window_add_message():
-    """Test adding message to conversation window."""
-    window = ConversationWindow(max_tokens=1000)
-    message = Message(role="user", content="Test message")
-    window.add_message(message)
-    assert len(window.messages) == 1
-    assert window.total_tokens == message.token_count
-
-
-def test_conversation_window_add_message_over_limit():
-    """Test adding message that exceeds token limit."""
-    window = ConversationWindow(max_tokens=10)
-    message = Message(
-        role="user",
-        content="This is a long message that exceeds the token limit",
-        token_count=20,  # Force token count to exceed limit
-    )
-    window.add_message(message)
-    assert len(window.messages) == 0
-    assert window.total_tokens == 0
-
-
-def test_conversation_window_clear():
-    """Test clearing conversation window."""
-    window = ConversationWindow(max_tokens=1000)
-    window.add_message(Message(role="user", content="Test message"))
-    window.clear()
-    assert len(window.messages) == 0
-    assert window.total_tokens == 0
-
-
-def test_client_init(client):
-    """Test AnthropicClient initialization."""
-    assert client.model == "claude-3-opus-20240229"
-    assert isinstance(client.workspace_dir, Path)
-    assert client.tools is not None
-
-
-def test_client_send_message(client, mock_anthropic):
-    """Test sending message to Anthropic API."""
-    response = client.send_message("Test message")
-    assert response == "Test response"
+    assert response_text == "Test response"
+    assert tool_calls == []
     mock_anthropic.messages.create.assert_called_once()
+    assert len(client.conversation.messages) == 2  # User message + response
 
 
-def test_client_send_message_with_history(client, mock_anthropic):
+def test_send_message_with_history(client, mock_anthropic):
     """Test sending message with conversation history."""
-    client.conversation.add_message(Message(role="user", content="Previous message"))
-    response = client.send_message("Test message")
-    assert response == "Test response"
+    # Add some history
+    client.conversation.add_message(Message("user", "Previous message"))
+    client.conversation.add_message(Message("assistant", "Previous response"))
 
+    response_text, tool_calls = client.send_message("Test message", with_history=True)
+
+    assert response_text == "Test response"
+    assert tool_calls == []
     call_args = mock_anthropic.messages.create.call_args[1]
-    assert len(call_args["messages"]) == 2
+    assert len(call_args["messages"]) == 3  # Previous messages + new message
 
 
-def test_client_process_tool_calls(client, mock_tools):
-    """Test processing tool calls in message."""
-    # Reset mock to ensure clean state
-    mock_tools.execute_tool.reset_mock()
-    mock_tools.execute_tool.return_value = Mock(
-        status=ToolResponseStatus.SUCCESS,
-        data="test result",
-        error=None,
-    )
+def test_send_message_without_history(client, mock_anthropic):
+    """Test sending message without conversation history."""
+    # Add some history that should be ignored
+    client.conversation.add_message(Message("user", "Previous message"))
+    client.conversation.add_message(Message("assistant", "Previous response"))
 
-    message = """Let me use a tool:
-    <tool_call>
-    {
-        "name": "test_tool",
-        "args": {}
-    }
-    </tool_call>
-    """
+    response_text, tool_calls = client.send_message("Test message", with_history=False)
 
-    result = client.process_tool_calls(message)
-    assert "test result" in result
-    mock_tools.execute_tool.assert_called_once_with("test_tool", {})
+    assert response_text == "Test response"
+    assert tool_calls == []
+    call_args = mock_anthropic.messages.create.call_args[1]
+    assert len(call_args["messages"]) == 1  # Only new message
 
 
-def test_client_process_invalid_tool_call(client):
-    """Test processing invalid tool call."""
-    message = """Let me use a tool:
-    <tool_call>
-    invalid json
-    </tool_call>
-    """
+def test_conversation_window_token_limit(client):
+    """Test conversation window token limit handling."""
+    # Add message that exceeds token limit
+    large_message = Message(
+        "user", "x" * 100000, token_count=100000
+    )  # Force large token count
+    client.conversation.add_message(large_message)
 
-    result = client.process_tool_calls(message)
-    assert "Error parsing tool call JSON" in result
+    assert len(client.conversation.messages) == 0  # Message should be skipped
+
+    # Add normal message
+    normal_message = Message("user", "Normal message")
+    client.conversation.add_message(normal_message)
+
+    assert len(client.conversation.messages) == 1  # Normal message should be added
 
 
-def test_client_process_tool_error(client, mock_tools):
-    """Test processing tool that returns error."""
-    # Reset mock to ensure clean state
-    mock_tools.execute_tool.reset_mock()
-    mock_tools.execute_tool.return_value = Mock(
-        status=ToolResponseStatus.ERROR,
-        error="Test error",
-        data=None,
-    )
+def test_conversation_history_persistence(client, tmp_path):
+    """Test conversation history persistence."""
+    response_text, tool_calls = client.send_message("Test message")
 
-    message = """Let me use a tool:
-    <tool_call>
-    {
-        "name": "error_tool",
-        "args": {}
-    }
-    </tool_call>
-    """
+    # Verify history was saved to SQLite
+    db_path = tmp_path / "conversations" / "conversations.db"
+    assert db_path.exists()
 
-    result = client.process_tool_calls(message)
-    assert "Error: Test error" in result
-    mock_tools.execute_tool.assert_called_once_with("error_tool", {})
+    # Verify history contents
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    count = cursor.fetchone()[0]
+    assert count == 2  # User message + response
