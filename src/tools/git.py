@@ -83,12 +83,12 @@ class GitAutomation:
         print("Failed to create pull request:", response.json())
         return False
 
-    def sync_fork(self, repo_url, fork_path):
+    def sync_fork(self, repo_url, fork_url):
         """Sync fork with the main branch."""
         try:
             # Clone or open the fork repository
             if not os.path.exists(self.main_git_dir):
-                Repo.clone_from(fork_path, self.main_git_dir)
+                Repo.clone_from(fork_url, self.main_git_dir)
             fork_repo = Repo(self.main_git_dir)
             origin = fork_repo.remotes.origin
             

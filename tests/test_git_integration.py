@@ -4,6 +4,7 @@ example_repo = "https://github.com/koii-network/docs.git"
 original_owner = "koii-network"
 owner = "HermanL02"
 repo = "docs"
+fork_url = "https://github.com/HermanL02/docs.git"
 example_branch_name = "new-feature-branch"
 def test_fork_repo():
     git_automation = GitAutomation(git_dir="./")
@@ -31,7 +32,7 @@ def test_create_pr():
 
 def test_sync_fork():
     git_automation = GitAutomation(git_dir="./")
-    assert git_automation.sync_fork(example_repo, "./") is True
+    assert git_automation.sync_fork(example_repo, fork_url) is True
 
 if __name__ == "__main__":
     # test_fork_repo()
@@ -40,3 +41,4 @@ if __name__ == "__main__":
     # test_checkout_new_branch()
     # test_commit_and_push()
     # test_create_pr()
+    test_sync_fork()
