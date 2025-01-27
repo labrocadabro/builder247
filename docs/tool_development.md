@@ -1,6 +1,6 @@
 # Tool Development Guidelines
 
-This document outlines the standards and best practices for developing new tools in the Anthropic CLI Tools project.
+This document outlines the standards and best practices for developing new tools in the Implementation Agent project.
 
 ## Tool Structure
 
@@ -17,28 +17,39 @@ Each tool should follow these core principles:
    - Extend the `ToolImplementations` class
    - Use type hints and docstrings
    - Return standardized `ToolResponse` objects
-   - Handle errors gracefully
+   - Handle errors with retry support
 
 ## Example Tool Definition
 
 ```python
 {
     "name": "read_file",
-    "description": "Read the contents of a file",
+    "description": "Read the contents of a file with security checks",
     "parameters": {
-        "type": "object",
         "properties": {
-            "file_path": {
+            "relative_workspace_path": {
                 "type": "string",
-                "description": "Path to the file to read",
+                "description": "Path to the file to read, relative to workspace root",
             },
-            "encoding": {
-                "type": "string",
-                "description": "File encoding",
-                "optional": True,
+            "should_read_entire_file": {
+                "type": "boolean",
+                "description": "Whether to read the entire file",
+            },
+            "start_line_one_indexed": {
+                "type": "integer",
+                "description": "The line to start reading from (1-indexed)",
+            },
+            "end_line_one_indexed_inclusive": {
+                "type": "integer",
+                "description": "The line to end reading at (1-indexed, inclusive)",
             }
         },
-        "required": ["file_path"],
+        "required": [
+            "relative_workspace_path",
+            "should_read_entire_file",
+            "start_line_one_indexed",
+            "end_line_one_indexed_inclusive"
+        ],
     },
 }
 ```
@@ -46,23 +57,55 @@ Each tool should follow these core principles:
 ## Example Tool Implementation
 
 ```python
-def read_file(self, path: Union[str, Path]) -> ToolResponse:
+def read_file(
+    self,
+    relative_workspace_path: str,
+    should_read_entire_file: bool,
+    start_line_one_indexed: int,
+    end_line_one_indexed_inclusive: int,
+) -> ToolResponse:
     """Read a file with security checks.
 
     Args:
-        path: Path to the file to read
+        relative_workspace_path: Path relative to workspace root
+        should_read_entire_file: Whether to read entire file
+        start_line_one_indexed: Start line (1-indexed)
+        end_line_one_indexed_inclusive: End line (1-indexed)
 
     Returns:
         ToolResponse with file contents or error
     """
     try:
-        content = self.fs_tools.read_file(path)
-        return ToolResponse(
-            status=ToolResponseStatus.SUCCESS,
-            data=content,
-            metadata={"path": str(path)},
-        )
+        # Use retry wrapper for error recovery
+        @with_retry(config=self.retry_config)
+        def read_operation():
+            content = self.fs_tools.read_file(
+                relative_workspace_path,
+                should_read_entire_file,
+                start_line_one_indexed,
+                end_line_one_indexed_inclusive,
+            )
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data=content,
+                metadata={
+                    "path": relative_workspace_path,
+                    "start_line": start_line_one_indexed,
+                    "end_line": end_line_one_indexed_inclusive,
+                },
+            )
+
+        return read_operation()
+
     except Exception as e:
+        self.logger.log_error(
+            "read_file",
+            str(e),
+            {
+                "path": relative_workspace_path,
+                "error_type": e.__class__.__name__,
+            },
+        )
         return ToolResponse(
             status=ToolResponseStatus.ERROR,
             error=f"Error reading file: {e}",
@@ -74,61 +117,62 @@ def read_file(self, path: Union[str, Path]) -> ToolResponse:
 
 1. **Security**
 
-   - Always use the security context for file operations
-   - Validate all inputs
-   - Never execute raw user input without sanitization
-   - Use appropriate file permissions
+   - Always use SecurityContext for sensitive operations
+   - Validate paths against workspace root
+   - Sanitize command inputs and outputs
+   - Handle environment variables securely
 
 2. **Error Handling**
 
-   - Catch and handle exceptions appropriately
-   - Return meaningful error messages
-   - Include relevant metadata in error responses
-   - Log errors for debugging
+   - Use the retry mechanism for recoverable errors
+   - Log errors with context using ToolLogger
+   - Return structured error responses
+   - Include detailed metadata
 
 3. **Testing**
 
-   - Write unit tests for both success and failure cases
-   - Test edge cases and invalid inputs
-   - Mock external dependencies
-   - Verify security constraints
+   - Write comprehensive unit tests
+   - Test security constraints
+   - Verify retry behavior
+   - Test error handling paths
 
 4. **Documentation**
 
    - Write clear docstrings
-   - Document parameters and return types
-   - Include usage examples
-   - Document any security considerations
+   - Document security considerations
+   - Include retry behavior
+   - Document metadata fields
 
 5. **Performance**
-   - Keep operations efficient
-   - Handle large inputs appropriately
-   - Consider memory usage
-   - Add appropriate timeouts
+   - Use appropriate timeouts
+   - Handle large files efficiently
+   - Consider memory constraints
+   - Monitor resource usage
 
 ## Adding a New Tool
 
-1. Define the tool interface in `TOOL_DEFINITIONS`
-2. Implement the tool in `ToolImplementations`
-3. Add unit tests in `tests/unit/`
-4. Add integration tests if needed
-5. Update documentation
-6. Run the full test suite
+1. Define tool in `TOOL_DEFINITIONS`
+2. Implement in `ToolImplementations`
+3. Add security checks
+4. Implement retry logic
+5. Add comprehensive tests
+6. Update documentation
 
 ## Common Patterns
 
 1. **File Operations**
 
-   - Use `FileSystemTools` for file operations
-   - Always check paths against security context
-   - Handle file encodings appropriately
+   - Use `FileSystemTools` with security checks
+   - Validate paths against workspace
+   - Handle line-based operations
+   - Support partial file reads
 
 2. **Command Execution**
 
-   - Use `CommandExecutor` for shell commands
-   - Validate and sanitize command inputs
-   - Set appropriate timeouts
-   - Handle command output consistently
+   - Use `CommandExecutor` with security
+   - Handle environment variables
+   - Support piped commands
+   - Sanitize output
 
 3. **Response Format**
    ```python
@@ -136,8 +180,10 @@ def read_file(self, path: Union[str, Path]) -> ToolResponse:
        status=ToolResponseStatus.SUCCESS,  # or ERROR
        data=result,                        # on success
        error=str(error),                   # on failure
-       metadata={                          # always include relevant metadata
-           "key": "value",
+       metadata={                          # always include metadata
+           "path": "relative/path",
+           "error_type": "ExceptionClass",
+           "additional_context": "value",
        },
    )
    ```

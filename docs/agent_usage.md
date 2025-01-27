@@ -19,6 +19,9 @@ The agent is configured using the `AgentConfig` class with the following paramet
 - `model` (str, optional): Claude model to use, defaults to "claude-3-opus-20240229"
 - `max_retries` (int, optional): Maximum retry attempts for failing tests, defaults to 3
 - `log_file` (str, optional): Path to log file for agent operations
+- `api_key` (str, optional): Anthropic API key (will use ANTHROPIC_API_KEY env var if not provided)
+- `max_tokens` (int, optional): Maximum tokens in conversation window, defaults to 100000
+- `history_dir` (Path, optional): Directory for storing conversation history
 
 Example configuration:
 
@@ -30,10 +33,39 @@ config = AgentConfig(
     workspace_dir=Path("./my_project"),
     model="claude-3-opus-20240229",
     max_retries=3,
-    log_file="agent.log"
+    log_file="agent.log",
+    max_tokens=100000,
+    history_dir=Path("./history")
 )
 agent = ImplementationAgent(config)
 ```
+
+## Components
+
+The agent uses several key components:
+
+1. **AnthropicClient**: Handles communication with the Claude API
+
+   - Manages conversation history and token limits
+   - Supports conversation persistence
+   - Handles tool calls and responses
+
+2. **CommandExecutor**: Safely executes shell commands with security checks
+
+   - Enforces command security policies
+   - Handles environment variables safely
+   - Supports piped commands
+
+3. **SecurityContext**: Manages security constraints and protected resources
+
+   - Controls resource limits
+   - Protects sensitive environment variables
+   - Sanitizes command output
+
+4. **ToolLogger**: Provides structured logging of operations
+   - Logs operations and errors
+   - Supports file-based logging
+   - Includes operation context
 
 ## Usage
 
@@ -64,6 +96,49 @@ The agent will:
 4. Generate and run tests
 5. Iterate on failing tests up to max_retries times
 
+### Conversation History
+
+The agent now supports persistent conversation history:
+
+```python
+# Configure with history directory
+config = AgentConfig(
+    workspace_dir=Path("./my_project"),
+    history_dir=Path("./history")
+)
+agent = ImplementationAgent(config)
+
+# History is automatically saved during interactions
+```
+
+The conversation history includes:
+
+- User messages
+- Assistant responses
+- Timestamps
+- Token counts
+
+### Security
+
+The agent enforces security through multiple layers:
+
+1. **Command Execution**:
+
+   - Restricted command patterns
+   - Protected environment variables
+   - Safe working directory handling
+
+2. **File Operations**:
+
+   - Path validation
+   - Permission checks
+   - Workspace directory restrictions
+
+3. **Environment Protection**:
+   - Sensitive variable filtering
+   - Output sanitization
+   - Resource constraints
+
 ### Monitoring Progress
 
 The agent logs all operations to the configured log file (if specified) or to the default Python logger. The logs include:
@@ -72,24 +147,17 @@ The agent logs all operations to the configured log file (if specified) or to th
 - Implementation plans
 - Test results
 - Error details
-
-### Security
-
-The agent uses several security measures:
-
-- Command execution is restricted to safe operations
-- Environment variables are protected
-- File system access is limited to the workspace directory
-- Sensitive data is redacted from logs
+- Tool execution results
 
 ### Error Handling
 
 The agent handles various error conditions:
 
 - Network/API errors when communicating with Claude
-- Test failures
+- Test failures with automatic retries
 - File system permission issues
 - Command execution errors
+- Token limit exceeded errors
 
 Errors are logged and propagated appropriately to the calling code.
 
@@ -100,6 +168,9 @@ Errors are logged and propagated appropriately to the calling code.
 3. **Version Control**: Run the agent in a clean git branch
 4. **Review Changes**: Always review the agent's changes before committing
 5. **Logging**: Configure a log file to track the agent's operations
+6. **Security**: Review the security context configuration for your environment
+7. **History Management**: Use history_dir for persistent conversations
+8. **Token Management**: Monitor and adjust max_tokens based on your needs
 
 ## Example Workflow
 
@@ -110,7 +181,9 @@ from src.agent import AgentConfig, ImplementationAgent
 # Configure the agent
 config = AgentConfig(
     workspace_dir=Path("./my_project"),
-    log_file="agent.log"
+    log_file="agent.log",
+    history_dir=Path("./history"),
+    max_tokens=100000
 )
 agent = ImplementationAgent(config)
 
@@ -138,6 +211,9 @@ Common issues and solutions:
 2. **Permission Errors**: Ensure proper file permissions in workspace
 3. **API Errors**: Verify API key and network connectivity
 4. **Memory Issues**: Reduce model context size or break down larger tasks
+5. **Security Restrictions**: Review security context if operations are blocked
+6. **Token Limits**: Adjust max_tokens if conversations are too long
+7. **History Issues**: Check history_dir permissions and space
 
 ## Contributing
 
