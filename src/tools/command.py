@@ -11,6 +11,7 @@ from pathlib import Path
 from .types import ToolResponse, ToolResponseStatus
 from ..security.core_context import SecurityContext
 from ..utils.string_sanitizer import sanitize_text
+from .implementations import ToolImplementations
 
 
 class CommandError(Exception):
@@ -502,3 +503,43 @@ class CommandExecutor:
             ):
                 clean_env[key] = value
         return clean_env
+
+
+def register_command_tools(tool_impl: ToolImplementations) -> None:
+    """Register command execution tools with ToolImplementations.
+
+    Args:
+        tool_impl: ToolImplementations instance
+    """
+    cmd_executor = tool_impl.cmd_executor
+
+    tool_impl.register_tool(
+        "run_command",
+        cmd_executor.run_command,
+        schema={
+            "description": "Execute a shell command",
+            "parameters": {
+                "command": {"type": "string", "description": "Command to execute"},
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables to set",
+                    "optional": True,
+                },
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "run_piped_commands",
+        cmd_executor.run_piped_commands,
+        schema={
+            "description": "Execute a pipeline of shell commands",
+            "parameters": {
+                "commands": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "string"}},
+                    "description": "List of commands to pipe together",
+                }
+            },
+        },
+    )

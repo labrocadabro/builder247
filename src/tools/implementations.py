@@ -5,6 +5,7 @@ from pathlib import Path
 import inspect
 import logging
 import re
+import os
 
 from .command import CommandExecutor
 from .filesystem import FileSystemTools
@@ -271,3 +272,175 @@ class ToolImplementations:
             }
 
         return tool_list
+
+    def add_test_file(
+        self,
+        test_name: str,
+        test_content: str,
+        test_type: str = "unit",
+    ) -> ToolResponse:
+        """Add or update a test file with built-in constraints.
+
+        Args:
+            test_name: Name of the test without extension
+            test_content: Content of the test file
+            test_type: Type of test (unit, integration, e2e)
+
+        Returns:
+            ToolResponse with the path of the created test file
+        """
+        # Validate test type
+        valid_types = {"unit", "integration", "e2e"}
+        if test_type not in valid_types:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Invalid test type. Must be one of: {valid_types}",
+                metadata={"error_type": "ValueError"},
+            )
+
+        # Enforce test location based on type
+        test_dir = {
+            "unit": "tests/unit",
+            "integration": "tests/integration",
+            "e2e": "tests/e2e",
+        }[test_type]
+
+        # Ensure test directory exists
+        os.makedirs(test_dir, exist_ok=True)
+
+        # Generate safe test file path
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", test_name)
+        if not safe_name.endswith("_test"):
+            safe_name += "_test"
+        test_path = os.path.join(test_dir, f"{safe_name}.py")
+
+        # Validate test content
+        if not any(marker in test_content for marker in ["@pytest.mark", "class Test"]):
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error="Test content must include pytest markers and test classes",
+                metadata={"error_type": "ValueError"},
+            )
+
+        try:
+            # Write the test file
+            self.fs_tools.write_file(test_path, test_content)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"path": test_path},
+                metadata={
+                    "test_type": test_type,
+                    "test_name": safe_name,
+                    "path": test_path,
+                },
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to write test file: {e}",
+                metadata={"error_type": e.__class__.__name__},
+            )
+
+    def implement_feature(
+        self, feature_path: str, implementation: str, description: str
+    ) -> ToolResponse:
+        """Add or update a feature implementation with built-in constraints.
+
+        Args:
+            feature_path: Path to the implementation file relative to src/
+            implementation: Implementation code
+            description: Description of the implementation
+
+        Returns:
+            ToolResponse with the path of the modified file
+        """
+        # Validate feature path is in src
+        if not feature_path.startswith("src/"):
+            feature_path = os.path.join("src", feature_path)
+
+        # Prevent modification of test files
+        if "tests/" in feature_path:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error="Cannot modify test files with implement_feature",
+                metadata={"error_type": "ValueError"},
+            )
+
+        try:
+            # Create parent directories if needed
+            os.makedirs(os.path.dirname(feature_path), exist_ok=True)
+
+            # Add docstring if implementing new file
+            if not os.path.exists(feature_path):
+                implementation = f'"""{description}\n"""\n\n{implementation}'
+
+            # Write the implementation
+            self.fs_tools.write_file(feature_path, implementation)
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"path": feature_path},
+                metadata={"path": feature_path, "description": description},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to write implementation: {e}",
+                metadata={"error_type": e.__class__.__name__},
+            )
+
+    def run_tests(
+        self,
+        test_paths: Optional[List[str]] = None,
+        markers: Optional[List[str]] = None,
+    ) -> ToolResponse:
+        """Run pytest with specific constraints.
+
+        Args:
+            test_paths: Optional specific test paths to run
+            markers: Optional pytest markers to filter tests
+
+        Returns:
+            ToolResponse with test results
+        """
+        try:
+            # Build pytest command
+            cmd = ["pytest", "-v"]
+
+            # Add markers if specified
+            if markers:
+                cmd.extend(["-m", " or ".join(markers)])
+
+            # Add specific test paths or run all tests
+            if test_paths:
+                cmd.extend(test_paths)
+            else:
+                cmd.append("tests/")
+
+            # Add coverage reporting
+            cmd.extend(["--cov=src", "--cov-report=term-missing"])
+
+            # Run tests
+            result = self.cmd_executor._execute(" ".join(cmd))
+
+            return ToolResponse(
+                status=(
+                    ToolResponseStatus.SUCCESS
+                    if result["exit_code"] == 0
+                    else ToolResponseStatus.ERROR
+                ),
+                data=result["stdout"] if result["exit_code"] == 0 else None,
+                error=result["stderr"] if result["exit_code"] != 0 else None,
+                metadata={
+                    "exit_code": result["exit_code"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"],
+                    "test_paths": test_paths,
+                    "markers": markers,
+                },
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=f"Failed to run tests: {e}",
+                metadata={"error_type": e.__class__.__name__},
+            )

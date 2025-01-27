@@ -1,20 +1,24 @@
 """Core implementation of the AI agent."""
 
 import os
-import re
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Callable, Any
 
 from .client import AnthropicClient
 from .tools import ToolImplementations
-from src.tools.types import ToolResponseStatus, ToolResponse
+from .tools.types import ToolResponseStatus, ToolResponse
 from .utils.monitoring import ToolLogger
 from .utils.retry import with_retry, RetryConfig
 from .acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
-from .test_history import TestHistory, TestFailureRecord
+from .storage.testing import TestHistory, TestResult
+from .tools.filesystem import register_filesystem_tools
+from .tools.command import register_command_tools
+from .tools.git import register_git_tools
+from .utils.commit_changes import create_commit
 
 
 class ImplementationPhase(str, Enum):
@@ -82,6 +86,11 @@ class ImplementationAgent:
             allowed_env_vars=config.allowed_env_vars,
             restricted_commands=config.restricted_commands,
         )
+
+        # Register all tools
+        register_filesystem_tools(self.tools)
+        register_command_tools(self.tools)
+        register_git_tools(self.tools)
 
         # Initialize test history tracking
         self.test_history = TestHistory(config.workspace_dir)
@@ -232,32 +241,167 @@ class ImplementationAgent:
             self.logger.log_error("setup_repository", str(e))
             return False
 
-    def _commit_changes(self, message: str) -> bool:
-        """Commit and push changes."""
-        try:
-            result = self.tools.execute_tool(
-                {"name": "git_commit_push", "parameters": {"message": message}}
+    def _commit_changes(self, message: str) -> Optional[str]:
+        """Commit and push changes.
+
+        Returns:
+            Commit ID if successful, None otherwise
+        """
+        return create_commit(self.tools, message)
+
+    def _track_test_commit(
+        self,
+        changed_files: List[str],
+        change_description: str,
+    ) -> Optional[str]:
+        """Track files for test history and create a commit.
+
+        Args:
+            changed_files: List of files that were changed
+            change_description: Description of what changed
+
+        Returns:
+            Commit ID if changes were committed, None if no changes or commit failed
+        """
+        if not changed_files:
+            return None
+
+        # Track changes for test history
+        for file_path in changed_files:
+            self._track_file_change(file_path)
+
+        # Create commit
+        commit_id = create_commit(self.tools, change_description)
+        if not commit_id:
+            self.logger.log_error(
+                "track_test_commit", f"Failed to commit changes: {change_description}"
             )
-            return result.status == ToolResponseStatus.SUCCESS
+            return None
+
+        return commit_id
+
+    def _handle_merge_conflicts(self) -> bool:
+        """Handle any merge conflicts during sync.
+
+        Returns:
+            True if conflicts were resolved successfully, False otherwise
+        """
+        try:
+            # Check for conflicts
+            check_result = self.tools.execute_tool({"name": "git_check_for_conflicts"})
+            if check_result.status != ToolResponseStatus.SUCCESS:
+                raise Exception(f"Failed to check for conflicts: {check_result.error}")
+
+            if not check_result.data["has_conflicts"]:
+                return True
+
+            # Get conflict details
+            info_result = self.tools.execute_tool({"name": "git_get_conflict_info"})
+            if info_result.status != ToolResponseStatus.SUCCESS:
+                raise Exception(f"Failed to get conflict info: {info_result.error}")
+
+            conflicts = info_result.data["conflicts"]
+
+            # Have LLM analyze and resolve each conflict
+            for file_path, conflict_info in conflicts.items():
+                # Create message for LLM with conflict context
+                message = [
+                    "Please resolve the following merge conflict:",
+                    f"\nFile: {file_path}",
+                    "\nAncestor version (common base):",
+                    conflict_info["content"]["ancestor"],
+                    "\nOur version (current changes):",
+                    conflict_info["content"]["ours"],
+                    "\nTheir version (upstream changes):",
+                    conflict_info["content"]["theirs"],
+                    "\nPlease provide a resolution that preserves the intent of both changes.",
+                ]
+
+                # Get LLM's proposed resolution
+                response_text, _ = self.client.send_message("\n".join(message))
+
+                # Apply resolution
+                resolve_result = self.tools.execute_tool(
+                    {
+                        "name": "git_resolve_conflict",
+                        "parameters": {
+                            "file_path": file_path,
+                            "resolution": response_text,
+                        },
+                    }
+                )
+                if resolve_result.status != ToolResponseStatus.SUCCESS:
+                    raise Exception(
+                        f"Failed to resolve conflict in {file_path}: {resolve_result.error}"
+                    )
+
+            # Create merge commit
+            commit_id = create_commit(
+                self.tools, "Merge upstream changes and resolve conflicts"
+            )
+            if not commit_id:
+                raise Exception("Failed to create merge commit")
+
+            # Run tests to verify resolution
+            if not self._run_tests_with_retry(commit_id, "Merge conflict resolution"):
+                raise Exception("Tests failed after conflict resolution")
+
+            return True
+
         except Exception as e:
-            self.logger.log_error("commit_changes", str(e))
+            self.logger.log_error("handle_merge_conflicts", str(e))
             return False
 
     def _finalize_changes(self, todo_item: str, acceptance_criteria: List[str]) -> bool:
         """Finalize changes and create PR."""
         try:
-            # Sync with upstream
-            sync_result = self.tools.execute_tool(
-                {
-                    "name": "git_sync_fork",
-                    "parameters": {
-                        "repo_url": self.config.upstream_url,
-                        "fork_url": self.config.fork_url,
-                    },
+            while True:
+                # Sync with upstream
+                sync_result = self.tools.execute_tool(
+                    {
+                        "name": "git_sync_fork",
+                        "parameters": {
+                            "repo_url": self.config.upstream_url,
+                            "fork_url": self.config.fork_url,
+                        },
+                    }
+                )
+                if sync_result.status != ToolResponseStatus.SUCCESS:
+                    raise Exception(
+                        f"Failed to sync with upstream: {sync_result.error}"
+                    )
+
+                # Handle any merge conflicts
+                if sync_result.data.get("has_conflicts"):
+                    if not self._handle_merge_conflicts():
+                        raise Exception("Failed to resolve merge conflicts")
+
+                # After any changes (sync/conflict resolution), verify tests
+                if self._all_tests_pass():
+                    break  # Tests pass, safe to proceed
+
+                # Tests failed - go back to fixes phase
+                phase_state = PhaseState(phase=ImplementationPhase.FIXES)
+                context = {
+                    "todo": todo_item,
+                    "criteria": acceptance_criteria,
+                    "test_results": self._get_test_results(),
                 }
-            )
-            if sync_result.status != ToolResponseStatus.SUCCESS:
-                raise Exception(f"Failed to sync with upstream: {sync_result.error}")
+
+                success = self._run_phase_with_recovery(
+                    phase_state,
+                    context,
+                    self._validate_fixes,
+                )
+                if not success:
+                    raise Exception("Failed to fix test failures after sync")
+                # Loop continues - will try to sync again
+
+            # All tests pass - create PR
+            pr_body = self._create_pr_body(todo_item, acceptance_criteria)
+            validation = self._validate_pr_body(pr_body)
+            if not validation.success:
+                raise Exception(f"Invalid PR description: {validation.feedback}")
 
             # Create PR
             pr_result = self.tools.execute_tool(
@@ -270,7 +414,7 @@ class ImplementationAgent:
                         "current_owner": self._get_repo_owner(self.config.fork_url),
                         "repo_name": self._get_repo_name(self.config.upstream_url),
                         "title": f"Implement: {todo_item}",
-                        "body": self._create_pr_body(todo_item, acceptance_criteria),
+                        "body": pr_body,
                     },
                 }
             )
@@ -301,17 +445,154 @@ class ImplementationAgent:
         return url.split("/")[-1].replace(".git", "")
 
     def _create_pr_body(self, todo_item: str, acceptance_criteria: List[str]) -> str:
-        """Create PR description."""
-        return "\n".join(
-            [
-                f"Implements: {todo_item}",
-                "",
-                "Acceptance Criteria:",
-                *[f"- [x] {criterion}" for criterion in acceptance_criteria],
-                "",
-                "All tests passing ✅",
-            ]
+        """Create PR description using template.
+
+        Args:
+            todo_item: The todo item being implemented
+            acceptance_criteria: List of acceptance criteria
+
+        Returns:
+            PR description following template
+        """
+        # Read PR template
+        try:
+            with open("docs/agent/pr_template.md", "r") as f:
+                template = f.read()
+        except Exception as e:
+            self.logger.log_error("create_pr_body", f"Failed to read PR template: {e}")
+            # Fallback to basic format if template not available
+            return "\n".join(
+                [
+                    f"Implements: {todo_item}",
+                    "",
+                    "Acceptance Criteria:",
+                    *[f"- [x] {criterion}" for criterion in acceptance_criteria],
+                    "",
+                    "All tests passing ✅",
+                ]
+            )
+
+        # Get implementation details
+        modified_files = self._get_recent_changes()
+        test_files = [f for f in modified_files if f.startswith("tests/")]
+        implementation_files = [f for f in modified_files if not f.startswith("tests/")]
+
+        # Fill in template sections
+        pr_body = (
+            template.replace(
+                "<!-- List the key changes made in this PR -->",
+                "\n".join(
+                    [
+                        "- [x] Feature implementation",
+                        "- [x] Test implementation",
+                        "- [x] Documentation updates",
+                    ]
+                ),
+            )
+            .replace(
+                "<!-- Provide a clear explanation of how the changes work -->",
+                "\n".join(
+                    [
+                        "Core changes:",
+                        *[f"- Modified `{f}`" for f in implementation_files],
+                        "",
+                        "Test coverage:",
+                        *[f"- Added `{f}`" for f in test_files],
+                        "",
+                        "Documentation:",
+                        "- Updated inline documentation",
+                        "- Added test docstrings",
+                    ]
+                ),
+            )
+            .replace(
+                "<!-- List how each requirement is satisfied -->",
+                "\n".join([f"- [x] {criterion}" for criterion in acceptance_criteria]),
+            )
+            .replace(
+                "<!-- Describe how the changes were tested -->",
+                "\n".join(
+                    [
+                        "- [x] Unit tests added/updated",
+                        "- [x] Integration tests added/updated",
+                        "- [x] All tests passing",
+                        "- [x] Test coverage maintained/improved",
+                    ]
+                ),
+            )
+            .replace(
+                "<!-- Confirm code quality standards are met -->",
+                "\n".join(
+                    [
+                        "- [x] Follows style guidelines",
+                        "- [x] No linting issues",
+                        "- [x] Clear and maintainable",
+                        "- [x] Properly documented",
+                    ]
+                ),
+            )
+            .replace(
+                "<!-- Note any security implications -->",
+                "\n".join(
+                    [
+                        "- [x] No new security risks introduced",
+                        "- [x] Secure coding practices followed",
+                        "- [x] Dependencies are up to date",
+                    ]
+                ),
+            )
+            .replace(
+                "<!-- Any other relevant information -->",
+                "\n".join(
+                    [
+                        "Dependencies added/updated:",
+                        "- No new dependencies",
+                        "",
+                        "Known limitations:",
+                        "- None identified",
+                    ]
+                ),
+            )
         )
+
+        return pr_body
+
+    def _validate_pr_body(self, pr_body: str) -> ValidationResult:
+        """Validate PR body against template requirements.
+
+        Args:
+            pr_body: Generated PR body
+
+        Returns:
+            ValidationResult indicating if PR body is valid
+        """
+        required_sections = [
+            "## Changes Made",
+            "## Implementation Details",
+            "## Requirements Met",
+            "## Testing",
+            "## Code Quality",
+            "## Security Considerations",
+        ]
+
+        missing_sections = []
+        for section in required_sections:
+            if section not in pr_body:
+                missing_sections.append(section)
+
+        if missing_sections:
+            return ValidationResult(
+                success=False,
+                feedback=f"PR description missing required sections: {', '.join(missing_sections)}",
+            )
+
+        # Check for unchecked boxes
+        if "- [ ]" in pr_body:
+            return ValidationResult(
+                success=False, feedback="PR description has unchecked requirement boxes"
+            )
+
+        return ValidationResult(success=True, feedback="PR description valid")
 
     def _initialize_context(
         self, todo_item: str, acceptance_criteria: List[str]
@@ -378,6 +659,42 @@ class ImplementationAgent:
                     self._handle_error(e, context["criteria"])
                     return None
 
+    def _get_guide_content(self, phase: ImplementationPhase) -> str:
+        """Get the relevant guide content for the current phase.
+
+        Args:
+            phase: Current implementation phase
+
+        Returns:
+            Guide content as string
+        """
+        # Always include workflow guide
+        guides = ["docs/agent/workflow_guide.md"]
+
+        # Add phase-specific guide
+        phase_guide = {
+            ImplementationPhase.ANALYSIS: "docs/agent/design_guide.md",
+            ImplementationPhase.IMPLEMENTATION: "docs/agent/implementation_guide.md",
+            ImplementationPhase.TESTING: "docs/agent/testing_guide.md",
+            ImplementationPhase.FIXES: "docs/agent/pr_guide.md",
+        }.get(phase)
+
+        if phase_guide:
+            guides.append(phase_guide)
+
+        # Add test template during testing phase
+        if phase == ImplementationPhase.TESTING:
+            guides.append("docs/test_template.py")
+
+        # Read and combine guides
+        content = []
+        for guide in guides:
+            if Path(guide).exists():
+                with open(guide, "r") as f:
+                    content.append(f.read())
+
+        return "\n\n".join(content) if content else ""
+
     def _create_message_with_context(
         self, context: Dict, phase_state: PhaseState
     ) -> str:
@@ -393,10 +710,15 @@ class ImplementationAgent:
                 ]
             )
 
+        # Add guide content for current phase
+        guide_content = self._get_guide_content(phase_state.phase)
+        if guide_content:
+            message.extend(["\nPhase Guidelines:", guide_content])
+
         # Add existing message content
         message.extend(
             [
-                f"Todo item: {context['todo']}",
+                f"\nTodo item: {context['todo']}",
                 "\nAcceptance Criteria:",
                 *[f"- {c}" for c in context["criteria"]],
             ]
@@ -437,31 +759,69 @@ class ImplementationAgent:
                     "\nCriterion to Test:",
                     context.get("current_criterion", ""),
                     "\nInstructions:",
-                    "1. Create tests that verify this criterion",
-                    "2. Include edge cases and error conditions",
-                    "3. Ensure tests are clear and maintainable",
+                    "1. Create tests following the provided test template structure",
+                    "2. Group related test cases in test classes",
+                    "3. Add clear docstrings explaining test purpose and assumptions",
+                    "4. Use appropriate pytest markers for test categorization",
+                    "5. Include edge cases and error conditions",
+                    "6. Ensure tests are clear and maintainable",
+                    "7. Add necessary fixtures for test setup",
                 ]
             )
 
         elif phase_state.phase == ImplementationPhase.FIXES:
+            # Get the failing tests and their history
+            failing_tests = context.get("failing_tests", [])
+            test_histories = {}
+            for test_file in failing_tests:
+                history = self.test_history.get_test_summary(test_file)
+                if history:
+                    test_histories[test_file] = history
+
+            message.append("\nTest Failures:")
+
+            for test_file, history in test_histories.items():
+                # Most recent failure first
+                latest = history[0]
+                message.extend(
+                    [
+                        f"\n{test_file}:",
+                        f"Current Status: {latest['status']}",
+                        f"Error Type: {latest['error_type']}",
+                        f"Modified Files: {', '.join(latest['modified_files'] or [])}",
+                        f"Failed Testing Commit: {latest['commit_id'][:8]} - {latest['commit_message']}",
+                        "\nFull Error Details:",
+                        context.get("test_results", {}).get(
+                            test_file, "No details available"
+                        ),
+                        "\nPrevious Attempts:",
+                    ]
+                )
+
+                # Add previous attempts with commit info
+                for h in history[1:]:
+                    message.append(
+                        f"- {h['timestamp']}: {h['status']} "
+                        f"(Duration: {h['duration']:.2f}s) "
+                        f"Testing commit {h['commit_id'][:8]} - {h['commit_message']}"
+                    )
+
             message.extend(
                 [
-                    "\nTest Results:",
-                    context.get("test_results", ""),
-                    "\nFailing Tests:",
-                    *context.get("failing_tests", []),
-                    "\nRecent Changes:",
-                    *context.get("recent_changes", []),
                     "\nInstructions:",
-                    "1. Analyze the test failures",
-                    "2. Determine if the test or implementation needs fixing",
-                    "3. Make the necessary changes",
+                    "1. Analyze the test failures and their history",
+                    "2. Note any patterns in failing tests",
+                    "3. Determine if the test or implementation needs fixing",
+                    "4. Make the necessary changes",
                 ]
             )
 
         if phase_state.last_feedback:
             message.extend(
-                ["\nFeedback from previous attempt:", phase_state.last_feedback]
+                [
+                    "\nFeedback from previous attempt:",
+                    phase_state.last_feedback,
+                ]
             )
 
         return "\n".join(message)
@@ -497,8 +857,20 @@ class ImplementationAgent:
                 success=False, feedback="No files were modified during implementation"
             )
 
+        # Use LLM's commit message or create a basic one
+        commit_message = results.get("commit_message")
+        if not commit_message:
+            return ValidationResult(
+                success=False, feedback="No commit message provided for changes"
+            )
+
+        # Commit changes and get commit ID
+        commit_id = create_commit(self.tools, commit_message)
+        if not commit_id:
+            return ValidationResult(success=False, feedback="Failed to commit changes")
+
         # Run tests to verify changes
-        if not self._run_tests_with_retry():
+        if not self._run_tests_with_retry(commit_id, commit_message):
             return ValidationResult(
                 success=False, feedback="Implementation caused test failures"
             )
@@ -514,9 +886,57 @@ class ImplementationAgent:
             )
 
         # Check if tests were added
-        if not results.get("test_files_added"):
+        test_files = results.get("test_files_added", [])
+        if not test_files:
             return ValidationResult(
                 success=False, feedback=f"No tests added for criterion: {criterion}"
+            )
+
+        # Validate test structure
+        for test_file in test_files:
+            with open(test_file, "r") as f:
+                content = f.read()
+
+                # Check for required template elements
+                if not any(
+                    marker in content
+                    for marker in ["pytest.mark.component", "pytest.mark"]
+                ):
+                    return ValidationResult(
+                        success=False,
+                        feedback=f"Test file {test_file} missing required pytest markers",
+                    )
+
+                if "class Test" not in content:
+                    return ValidationResult(
+                        success=False,
+                        feedback=f"Test file {test_file} should group tests in classes",
+                    )
+
+                if "@pytest.fixture" not in content:
+                    return ValidationResult(
+                        success=False,
+                        feedback=f"Test file {test_file} should include test fixtures",
+                    )
+
+                if '"""' not in content:
+                    return ValidationResult(
+                        success=False,
+                        feedback=f"Test file {test_file} missing docstring documentation",
+                    )
+
+        # Use LLM's commit message or fail
+        commit_message = results.get("commit_message")
+        if not commit_message:
+            return ValidationResult(
+                success=False, feedback="No commit message provided for test changes"
+            )
+
+        # Commit test files
+        commit_id = create_commit(self.tools, commit_message)
+        if not commit_id:
+            return ValidationResult(
+                success=False, feedback="Failed to commit test files"
             )
 
         return ValidationResult(success=True, results=results)
@@ -526,8 +946,20 @@ class ImplementationAgent:
         if not results.get("fixes_applied"):
             return ValidationResult(success=False, feedback="No fixes were applied")
 
+        # Use LLM's commit message or fail
+        commit_message = results.get("commit_message")
+        if not commit_message:
+            return ValidationResult(
+                success=False, feedback="No commit message provided for fixes"
+            )
+
+        # Commit fixes and get commit ID
+        commit_id = create_commit(self.tools, commit_message)
+        if not commit_id:
+            return ValidationResult(success=False, feedback="Failed to commit fixes")
+
         # Check if fixes resolved the failures
-        if not self._run_tests_with_retry():
+        if not self._run_tests_with_retry(commit_id, commit_message):
             return ValidationResult(
                 success=False, feedback="Fixes did not resolve test failures"
             )
@@ -536,7 +968,12 @@ class ImplementationAgent:
 
     def _execute_tools(self, tool_calls: List[Dict]) -> Optional[Dict]:
         """Execute a series of tool calls and collect results."""
-        results = {"files_modified": [], "test_files_added": [], "fixes_applied": []}
+        results = {
+            "files_modified": [],
+            "test_files_added": [],
+            "fixes_applied": [],
+            "commit_message": None,  # Will be provided by LLM
+        }
 
         for tool_call in tool_calls:
             result = self._execute_tool_safely(tool_call)
@@ -549,7 +986,10 @@ class ImplementationAgent:
                 if result.metadata["file"].startswith("tests/"):
                     results["test_files_added"].append(result.metadata["file"])
 
-            if tool_call.get("purpose") == "fix":
+            # Capture commit message if provided by LLM
+            if "commit_message" in tool_call:
+                results["commit_message"] = tool_call["commit_message"]
+            elif tool_call.get("purpose") == "fix":
                 results["fixes_applied"].append(tool_call.get("explanation", ""))
 
         return results
@@ -580,6 +1020,24 @@ class ImplementationAgent:
             Tool execution response
         """
         result = self.tools.execute_tool(tool_call)
+
+        # Track tool execution
+        if not hasattr(self, "_tool_history"):
+            self._tool_history = []
+
+        self._tool_history.append(
+            {
+                "name": tool_call["name"],
+                "parameters": tool_call.get("parameters", {}),
+                "status": result.status,
+                "error": (
+                    result.error
+                    if result.status != ToolResponseStatus.SUCCESS
+                    else None
+                ),
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
 
         if result.status == ToolResponseStatus.SUCCESS:
             # Track file changes
@@ -618,8 +1076,14 @@ class ImplementationAgent:
             self._recent_changes = []
         self._recent_changes.append(file_path)
 
-    def _run_tests_with_retry(self) -> bool:
+    def _run_tests_with_retry(
+        self, commit_id: Optional[str] = None, commit_message: Optional[str] = None
+    ) -> bool:
         """Run tests with retries and track failures.
+
+        Args:
+            commit_id: ID of commit being tested
+            commit_message: Message describing what the commit was trying to do
 
         Returns:
             True if tests pass, False otherwise
@@ -635,7 +1099,9 @@ class ImplementationAgent:
 
             if result.status != ToolResponseStatus.SUCCESS:
                 # Parse test output to record failures
-                self._record_test_failures(result.output, self._recent_changes)
+                self._record_test_results(
+                    result.output, self._recent_changes, commit_id, commit_message
+                )
                 return False
 
             return True
@@ -644,73 +1110,90 @@ class ImplementationAgent:
             self.logger.log_error("run_tests", str(e))
             return False
 
-    def _record_test_failures(
-        self, test_output: str, recent_changes: List[str]
-    ) -> None:
-        """Record test failures from pytest output."""
-        current_failure: Optional[Tuple[str, List[str], List[str]]] = None
-
-        for line in test_output.split("\n"):
-            if line.startswith("____"):
-                # Record previous failure if any
-                if current_failure:
-                    self._record_single_failure(*current_failure, recent_changes)
-                current_failure = None
-
-            elif "FAILED" in line and "::" in line:
-                # Start new failure
-                test_path = line.split("FAILED")[0].strip()
-                current_failure = (test_path, [], [])
-
-            elif current_failure:
-                test_path, error_lines, stack_lines = current_failure
-                if line.startswith("E "):
-                    error_lines.append(line[2:])
-                elif line.strip() and not line.startswith("_"):
-                    stack_lines.append(line)
-
-        # Record last failure
-        if current_failure:
-            self._record_single_failure(*current_failure, recent_changes)
-
-    def _record_single_failure(
+    def _record_test_results(
         self,
-        test_path: str,
-        error_lines: List[str],
-        stack_lines: List[str],
+        test_output: str,
         recent_changes: List[str],
+        commit_id: Optional[str] = None,
+        commit_message: Optional[str] = None,
     ) -> None:
-        """Record a single test failure."""
-        test_file = test_path.split("::")[0]
-        test_name = test_path.split("::")[-1]
+        """Record test results using LLM-structured data.
 
-        # Extract error type from first error line
-        error_message = "\n".join(error_lines)
-        error_type_match = re.match(r"^([a-zA-Z]+Error):", error_message)
-        error_type = error_type_match.group(1) if error_type_match else "UnknownError"
+        The LLM will analyze the test output and return structured data that matches
+        our TestResult format, regardless of the test framework used.
+        """
+        # Get structured test results from LLM
+        prompt = f"""Analyze the following test output and return a list of test results in JSON format.
+Each test result should include:
+- test_file: str (file containing the test)
+- test_name: str (name/identifier of the test)
+- status: str (one of: passed, failed, skipped, xfailed, xpassed)
+- duration: float (test duration in seconds)
+- error_type: str | null (type of error if failed)
+- error_message: str | null (error message if failed)
+- stack_trace: str | null (error stack trace if failed)
 
-        # Create failure record
-        failure = TestFailureRecord(
-            test_file=test_file,
-            test_name=test_name,
-            error_type=error_type,
-            error_message=error_message,
-            stack_trace="\n".join(stack_lines),
-            timestamp=datetime.now(),
-            modified_files=recent_changes,
-        )
-
-        # Record in database and test history
-        self.test_history.record_failure(failure)
-
-        # Also update criteria manager if this is a criterion test
-        criterion = self._find_criterion_for_test(test_file)
-        if criterion:
-            self.criteria_manager.update_criterion_status(
-                criterion,
-                CriteriaStatus.FAILED,
-                f"Test failure in {test_name}: {error_message}",
+Test output:
+{test_output}
+"""
+        response = self.client.send_message(prompt)
+        try:
+            test_results = json.loads(response)
+        except json.JSONDecodeError:
+            self.logger.log_error(
+                "record_test_results", "Failed to parse LLM response as JSON"
             )
+            return
+
+        # Record each test result
+        for result_data in test_results:
+            # Create TestResult object
+            result = TestResult(
+                test_file=result_data["test_file"],
+                test_name=result_data["test_name"],
+                status=result_data["status"],
+                duration=result_data.get("duration", 0.0),
+                error_type=result_data.get("error_type"),
+                error_message=result_data.get("error_message"),
+                stack_trace=result_data.get("stack_trace"),
+                timestamp=datetime.now(),
+                modified_files=recent_changes,
+                commit_id=commit_id,
+                commit_message=commit_message,
+                metadata={
+                    "tool_executions": self._get_recent_tool_executions(),
+                    "codebase_state": self._get_codebase_context(),
+                    "phase": (
+                        self.current_phase.value
+                        if hasattr(self, "current_phase")
+                        else None
+                    ),
+                    "attempts": (
+                        self.current_attempts
+                        if hasattr(self, "current_attempts")
+                        else 0
+                    ),
+                },
+            )
+
+            # Record in database
+            self.test_history.record_test_run([result])
+
+            # Update criteria manager if this is a criterion test
+            criterion = self._find_criterion_for_test(result.test_file)
+            if criterion:
+                if result.status == "failed":
+                    self.criteria_manager.update_criterion_status(
+                        criterion,
+                        CriteriaStatus.FAILED,
+                        f"Test failure in {result.test_name}: {result.error_message}",
+                    )
+                elif result.status in ["passed", "xpassed"]:
+                    self.criteria_manager.update_criterion_status(
+                        criterion,
+                        CriteriaStatus.VERIFIED,
+                        "Tests passed successfully",
+                    )
 
     def _find_criterion_for_test(self, test_file: str) -> Optional[str]:
         """Find which criterion a test file belongs to."""
@@ -784,3 +1267,143 @@ class ImplementationAgent:
             self.criteria_manager.update_criterion_status(
                 criterion, CriteriaStatus.FAILED, error_msg
             )
+
+    def _get_recent_tool_executions(self) -> List[Dict[str, Any]]:
+        """Get recent tool executions with their results.
+
+        Returns:
+            List of recent tool executions with name, parameters, and status
+        """
+        if not hasattr(self, "_tool_history"):
+            self._tool_history = []
+        return self._tool_history[-5:]  # Last 5 tool executions
+
+    def _get_test_results(self) -> Dict[str, str]:
+        """Get detailed results for the most recent test failures."""
+        results = {}
+        for test_file in self._get_failing_tests():
+            history = self.test_history.get_test_history(test_file, limit=1)
+            if history:
+                latest = history[0]
+                results[test_file] = (
+                    f"Error Type: {latest.error_type}\n"
+                    f"Error Message: {latest.error_message}\n"
+                    f"Stack Trace:\n{latest.stack_trace}"
+                )
+        return results
+
+    def _get_failing_tests(self) -> List[str]:
+        """Get list of currently failing tests."""
+        failing = []
+        for criterion, info in self.criteria_manager.criteria.items():
+            if info.status == CriteriaStatus.FAILED:
+                failing.extend(info.test_files)
+        return failing
+
+    def _get_detailed_test_result(
+        self, test_file: str, result_id: int
+    ) -> Optional[Dict]:
+        """Get detailed information about a specific test result.
+
+        Args:
+            test_file: Test file path
+            result_id: ID of the test result to retrieve
+
+        Returns:
+            Dictionary with detailed test information if found
+        """
+        result = self.test_history.get_detailed_result(test_file, result_id)
+        if not result:
+            return None
+
+        return {
+            "test_file": result.test_file,
+            "test_name": result.test_name,
+            "status": result.status,
+            "duration": result.duration,
+            "error_type": result.error_type,
+            "error_message": result.error_message,
+            "stack_trace": result.stack_trace,
+            "timestamp": result.timestamp.isoformat(),
+            "modified_files": result.modified_files,
+            "commit_id": result.commit_id,
+            "commit_message": result.commit_message,
+            "metadata": result.metadata,
+        }
+
+    def _get_commit_details(self, commit_id: str) -> Optional[Dict]:
+        """Get details about a specific commit.
+
+        Args:
+            commit_id: Git commit hash
+
+        Returns:
+            Dictionary with commit information if found
+        """
+        try:
+            result = self.tools.execute_tool(
+                {"name": "git_show_commit", "parameters": {"commit_id": commit_id}}
+            )
+            if result.status == ToolResponseStatus.SUCCESS:
+                return result.data
+            return None
+        except Exception as e:
+            self.logger.log_error("get_commit_details", str(e))
+            return None
+
+    def _create_commit_message(
+        self, change_type: str, description: str, details: Optional[str] = None
+    ) -> str:
+        """Create a descriptive commit message.
+
+        Args:
+            change_type: Type of change (implement/fix/test)
+            description: Brief description of changes
+            details: Optional additional details
+
+        Returns:
+            Formatted commit message
+        """
+        message = [f"{change_type}: {description}"]
+        if details:
+            message.extend(["", details])
+        return "\n".join(message)
+
+    def execute_tool(self, tool_name: str, params: Dict[str, Any]) -> ToolResponse:
+        """Execute a tool and handle any resulting file changes."""
+        result = self.tools.execute_tool(tool_name, params)
+
+        # Handle file changes from tools that modify files
+        if result.status == ToolResponseStatus.SUCCESS:
+            if tool_name == "edit_file":
+                commit_id = self._track_test_commit(
+                    [params["target_file"]], f"Update {params['target_file']}"
+                )
+                if commit_id:
+                    result.metadata["commit_id"] = commit_id
+                    result.metadata["commit_message"] = (
+                        f"Update {params['target_file']}"
+                    )
+
+            elif tool_name == "parallel_apply":
+                changed_files = [
+                    r["relative_workspace_path"] for r in params["edit_regions"]
+                ]
+                commit_id = self._track_test_commit(
+                    changed_files, "Update multiple files"
+                )
+                if commit_id:
+                    result.metadata["commit_id"] = commit_id
+                    result.metadata["commit_message"] = "Update multiple files"
+
+            elif tool_name == "delete_file":
+                commit_id = self._track_test_commit(
+                    [params["target_file"]], f"Delete {params['target_file']}"
+                )
+                if commit_id:
+                    result.metadata["commit_id"] = commit_id
+                    result.metadata["commit_message"] = (
+                        f"Delete {params['target_file']}"
+                    )
+
+        return result

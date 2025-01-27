@@ -272,6 +272,101 @@ class GitTools:
                 },
             )
 
+    def check_for_conflicts(self) -> ToolResponse:
+        """Check if there are merge conflicts.
+
+        Returns:
+            ToolResponse with has_conflicts boolean and list of conflicting files
+        """
+        try:
+            repo = Repo(self.git_dir)
+
+            # Check unmerged paths
+            unmerged = []
+            if repo.index.unmerged_blobs():
+                for path in repo.index.unmerged_blobs():
+                    unmerged.append(path)
+
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"has_conflicts": bool(unmerged), "conflicting_files": unmerged},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__},
+            )
+
+    def get_conflict_info(self) -> ToolResponse:
+        """Get details about current conflicts.
+
+        Returns:
+            ToolResponse with conflict details including:
+            - file path
+            - our changes
+            - their changes
+            - common ancestor
+        """
+        try:
+            repo = Repo(self.git_dir)
+            conflicts = {}
+
+            for path, blobs in repo.index.unmerged_blobs().items():
+                # Get all versions of the file (ancestor, ours, theirs)
+                versions = {blob.stage: blob.hexsha for _, blob in blobs}
+
+                conflict_info = {
+                    "path": path,
+                    "content": {
+                        "ancestor": repo.git.show(versions[1]) if 1 in versions else "",
+                        "ours": repo.git.show(versions[2]) if 2 in versions else "",
+                        "theirs": repo.git.show(versions[3]) if 3 in versions else "",
+                    },
+                }
+                conflicts[path] = conflict_info
+
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS, data={"conflicts": conflicts}
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__},
+            )
+
+    def resolve_conflict(self, file_path: str, resolution: str) -> ToolResponse:
+        """Resolve a conflict in a specific file.
+
+        Args:
+            file_path: Path to the conflicting file
+            resolution: Content to use for resolution
+
+        Returns:
+            ToolResponse indicating success/failure
+        """
+        try:
+            # Write resolution to file
+            full_path = self.git_dir / file_path
+            full_path.write_text(resolution)
+
+            # Stage the resolved file
+            repo = Repo(self.git_dir)
+            repo.index.add([file_path])
+
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"resolved": True},
+                metadata={"file": file_path},
+            )
+        except Exception as e:
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__, "file": file_path},
+            )
+
     def sync_fork(self, repo_url: str, fork_url: str) -> ToolResponse:
         """Sync fork with upstream repository.
 
@@ -280,7 +375,7 @@ class GitTools:
             fork_url: Fork repository URL
 
         Returns:
-            ToolResponse indicating success/failure
+            ToolResponse indicating success/failure and any conflicts
         """
         try:
 
@@ -302,14 +397,19 @@ class GitTools:
                 with repo.git.custom_environment(**self.git_env):
                     upstream.fetch()
                     repo.git.checkout("main")
-                    repo.git.merge("upstream/main")
-                    origin.push()
-                return True
+                    try:
+                        repo.git.merge("upstream/main")
+                        origin.push()
+                        return {"has_conflicts": False}
+                    except GitCommandError as e:
+                        if "CONFLICT" in str(e):
+                            return {"has_conflicts": True}
+                        raise
 
-            with_retry(sync_operation, config=self.retry_config)
+            result = with_retry(sync_operation, config=self.retry_config)
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
-                data={"synced": True},
+                data=result,
                 metadata={"repo_url": repo_url, "fork_url": fork_url},
             )
 
@@ -457,6 +557,40 @@ def register_git_tools(tool_impl: ToolImplementations) -> None:
             "description": "Clone a repository",
             "parameters": {
                 "repo_url": {"type": "string", "description": "Repository URL to clone"}
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_check_for_conflicts",
+        git_tools.check_for_conflicts,
+        schema={
+            "description": "Check if there are merge conflicts",
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_get_conflict_info",
+        git_tools.get_conflict_info,
+        schema={
+            "description": "Get details about current conflicts",
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_resolve_conflict",
+        git_tools.resolve_conflict,
+        schema={
+            "description": "Resolve a conflict in a specific file",
+            "parameters": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the conflicting file",
+                },
+                "resolution": {
+                    "type": "string",
+                    "description": "Content to use for resolution",
+                },
             },
         },
     )

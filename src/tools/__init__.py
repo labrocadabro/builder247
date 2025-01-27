@@ -121,4 +121,56 @@ TOOL_DEFINITIONS: List[Dict] = [
             "required": ["directory"],
         },
     },
+    {
+        "name": "add_test_file",
+        "description": "Add or update a test file in the appropriate test directory",
+        "parameters": {
+            "test_name": {
+                "type": "string",
+                "description": "Name of the test without extension",
+            },
+            "test_content": {
+                "type": "string",
+                "description": "Content of the test file",
+            },
+            "test_type": {
+                "type": "string",
+                "description": "Type of test (unit, integration, e2e)",
+                "default": "unit",
+            },
+        },
+    },
+    {
+        "name": "implement_feature",
+        "description": "Add or update a feature implementation file",
+        "parameters": {
+            "feature_path": {
+                "type": "string",
+                "description": "Path to the implementation file relative to src/",
+            },
+            "implementation": {"type": "string", "description": "Implementation code"},
+            "description": {
+                "type": "string",
+                "description": "Description of the implementation",
+            },
+        },
+    },
+    {
+        "name": "run_tests",
+        "description": "Run pytest with specific constraints",
+        "parameters": {
+            "test_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional specific test paths to run",
+                "optional": True,
+            },
+            "markers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional pytest markers to filter tests",
+                "optional": True,
+            },
+        },
+    },
 ]
