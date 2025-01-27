@@ -12,6 +12,8 @@ import sqlite3
 import tiktoken
 from threading import Lock
 import os
+from dataclasses import dataclass
+from .database import Database, DatabaseConfig
 
 
 def adapt_datetime(dt):
@@ -24,6 +26,96 @@ def convert_datetime(val):
     if isinstance(val, bytes):
         val = val.decode("utf-8")
     return datetime.fromisoformat(val)
+
+
+@dataclass
+class ConversationEntry:
+    """A single conversation entry."""
+
+    role: str
+    content: str
+    timestamp: datetime
+    metadata: Optional[Dict] = None
+
+
+class ConversationHistory:
+    """Manages conversation history in the database."""
+
+    def __init__(self, workspace_dir: Path):
+        """Initialize conversation history.
+
+        Args:
+            workspace_dir: Workspace directory path
+        """
+        config = DatabaseConfig(workspace_dir=workspace_dir)
+        self.db = Database(config)
+
+    def add_entry(self, entry: ConversationEntry) -> bool:
+        """Add a conversation entry to history.
+
+        Args:
+            entry: Conversation entry to add
+
+        Returns:
+            True if entry was added successfully
+        """
+        query = """
+            INSERT INTO conversations (timestamp, role, content, metadata)
+            VALUES (?, ?, ?, ?)
+        """
+        metadata_json = json.dumps(entry.metadata) if entry.metadata else None
+        params = (
+            entry.timestamp.isoformat(),
+            entry.role,
+            entry.content,
+            metadata_json,
+        )
+
+        cursor = self.db.execute(query, params)
+        return cursor is not None
+
+    def get_recent_entries(self, limit: int = 10) -> List[ConversationEntry]:
+        """Get recent conversation entries.
+
+        Args:
+            limit: Maximum number of entries to return
+
+        Returns:
+            List of recent conversation entries
+        """
+        query = """
+            SELECT timestamp, role, content, metadata
+            FROM conversations
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+
+        cursor = self.db.execute(query, (limit,))
+        if not cursor:
+            return []
+
+        entries = []
+        for row in cursor:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else None
+            entry = ConversationEntry(
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                role=row["role"],
+                content=row["content"],
+                metadata=metadata,
+            )
+            entries.append(entry)
+
+        return list(reversed(entries))  # Return in chronological order
+
+    def clear_history(self) -> bool:
+        """Clear all conversation history.
+
+        Returns:
+            True if history was cleared successfully
+        """
+        query = "DELETE FROM conversations"
+        cursor = self.db.execute(query)
+        return cursor is not None
 
 
 class ConversationHistoryManager:
