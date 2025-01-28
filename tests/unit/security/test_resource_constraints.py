@@ -7,6 +7,8 @@ from src.security.resource_constraints import (
     apply_resource_limits,
     RESOURCE_LIMITS,
 )
+import resource
+import pytest
 
 
 def test_record_dockerfile_limits():
@@ -95,3 +97,29 @@ def test_apply_resource_limits_error():
 
             # Should not raise exception
             apply_resource_limits(limits)
+
+
+def test_check_resource_limits():
+    """Test checking current resource limits."""
+    with patch("resource.getrlimit") as mock_getrlimit:
+        mock_getrlimit.return_value = (1024, 2048)
+
+        # Check all resource types
+        for limit_name, limit_const in RESOURCE_LIMITS.items():
+            current_soft, current_hard = resource.getrlimit(limit_const)
+            assert current_soft == 1024
+            assert current_hard == 2048
+
+        # Verify all resource types were checked
+        assert mock_getrlimit.call_count == len(RESOURCE_LIMITS)
+
+
+def test_check_resource_limits_error():
+    """Test error handling when checking resource limits."""
+    with patch("resource.getrlimit") as mock_getrlimit:
+        mock_getrlimit.side_effect = ValueError("Test error")
+
+        # Should raise exception since this is a critical security check
+        with pytest.raises(ValueError):
+            for limit_const in RESOURCE_LIMITS.values():
+                resource.getrlimit(limit_const)

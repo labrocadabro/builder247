@@ -1,5 +1,6 @@
 """Unit tests for environment variable utilities."""
 
+import os
 from unittest.mock import patch, mock_open
 from src.security.environment_protection import (
     record_dockerfile_vars,
@@ -53,3 +54,59 @@ def test_load_dockerfile_vars_whitespace():
     with patch("builtins.open", mock_file):
         vars = load_dockerfile_vars()
         assert vars == {"API_KEY", "SECRET_TOKEN"}
+
+
+def test_protected_vars_with_values():
+    """Test handling of protected variables with values."""
+    mock_content = "API_KEY\nSECRET_TOKEN\n"
+    mock_file = mock_open(read_data=mock_content)
+
+    with patch("builtins.open", mock_file):
+        # Set environment variables
+        os.environ["API_KEY"] = "test_key"
+        os.environ["SECRET_TOKEN"] = "test_token"
+        os.environ["UNPROTECTED"] = "visible"
+
+        vars = load_dockerfile_vars()
+        assert vars == {"API_KEY", "SECRET_TOKEN"}
+
+        # Clean up
+        del os.environ["API_KEY"]
+        del os.environ["SECRET_TOKEN"]
+        del os.environ["UNPROTECTED"]
+
+
+def test_protected_vars_empty_values():
+    """Test handling of protected variables with empty values."""
+    mock_content = "API_KEY\nSECRET_TOKEN\n"
+    mock_file = mock_open(read_data=mock_content)
+
+    with patch("builtins.open", mock_file):
+        # Set empty environment variables
+        os.environ["API_KEY"] = ""
+        os.environ["SECRET_TOKEN"] = ""
+
+        vars = load_dockerfile_vars()
+        assert vars == {"API_KEY", "SECRET_TOKEN"}
+
+        # Clean up
+        del os.environ["API_KEY"]
+        del os.environ["SECRET_TOKEN"]
+
+
+def test_protected_vars_special_chars():
+    """Test handling of protected variables with special characters."""
+    mock_content = "API_KEY\nSECRET_TOKEN\n"
+    mock_file = mock_open(read_data=mock_content)
+
+    with patch("builtins.open", mock_file):
+        # Set variables with special characters
+        os.environ["API_KEY"] = "test!@#$%^&*()"
+        os.environ["SECRET_TOKEN"] = "test\ntoken\r\n"
+
+        vars = load_dockerfile_vars()
+        assert vars == {"API_KEY", "SECRET_TOKEN"}
+
+        # Clean up
+        del os.environ["API_KEY"]
+        del os.environ["SECRET_TOKEN"]
