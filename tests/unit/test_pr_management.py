@@ -2,7 +2,7 @@
 
 import pytest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from src.pr_management import PRConfig, PRManager
 from src.tools.types import ToolResponse, ToolResponseStatus
@@ -89,90 +89,113 @@ class TestPRManager:
         assert pr_manager.logger == mock_logger
         assert pr_manager.phase_manager == mock_phase_manager
 
-    def test_get_repo_owner(self, pr_manager):
-        """Test extracting repository owner from URL."""
-        url = "https://github.com/test-org/test-repo"
-        assert pr_manager._get_repo_owner(url) == "test-org"
-
-    def test_get_repo_name(self, pr_manager):
-        """Test extracting repository name from URL."""
-        url = "https://github.com/test-org/test-repo"
-        assert pr_manager._get_repo_name(url) == "test-repo"
-
     def test_validate_pr_body_valid(self, pr_manager):
         """Test PR body validation with valid content."""
         pr_body = """
-        ## Description
-        Test description
+        ## Changes Made
+        Test changes
 
         ## Implementation Details
-        - Detail 1
-        - Detail 2
+        Test implementation
 
         ## Requirements Met
-        - Requirement 1
-        - Requirement 2
+        - [x] Requirement 1
+        - [x] Requirement 2
 
         ## Testing
-        - Test 1
-        - Test 2
+        Test coverage
 
         ## Code Quality
-        - Quality check 1
-        - Quality check 2
+        Quality standards
 
         ## Security Considerations
-        - Security check 1
-        - Security check 2
-
-        ## Changes Made
-        - Change 1
-        - Change 2
+        Security notes
         """
 
-        # Mock the validation to return None for valid PR body
-        pr_manager._validate_pr_body = Mock(return_value=None)
+        result = pr_manager._validate_pr_body(pr_body)
+        assert result == "PR description valid"
+
+    def test_validate_pr_body_missing_sections(self, pr_manager):
+        """Test PR body validation with missing sections."""
+        pr_body = """
+        ## Changes Made
+        Test changes
+
+        ## Implementation Details
+        Test implementation
+        """
 
         result = pr_manager._validate_pr_body(pr_body)
-        assert result is None
+        assert "missing required sections" in result.lower()
 
-    def test_validate_pr_body_invalid(self, pr_manager):
-        """Test PR body validation with invalid content."""
-        pr_body = "Invalid PR body"
+    def test_validate_pr_body_unchecked_boxes(self, pr_manager):
+        """Test PR body validation with unchecked requirement boxes."""
+        pr_body = """
+        ## Changes Made
+        Test changes
+
+        ## Implementation Details
+        Test implementation
+
+        ## Requirements Met
+        - [ ] Unchecked requirement
+
+        ## Testing
+        Test coverage
+
+        ## Code Quality
+        Quality standards
+
+        ## Security Considerations
+        Security notes
+        """
 
         result = pr_manager._validate_pr_body(pr_body)
-        assert isinstance(result, str)
-        assert len(result) > 0
+        assert "unchecked requirement" in result.lower()
 
-    @patch("src.pr_management.PRManager._all_tests_pass")
-    def test_finalize_changes_success(self, mock_all_tests_pass, pr_manager):
-        """Test successful PR finalization."""
-        mock_all_tests_pass.return_value = True
-        pr_manager.tools.execute_tool = Mock(
-            return_value=ToolResponse(
-                status=ToolResponseStatus.SUCCESS, data={"has_conflicts": False}
-            )
+    def test_create_pr_body_fallback(self, pr_manager):
+        """Test PR body creation fallback when template is missing."""
+        pr_manager._get_recent_changes = Mock(return_value=["test.py"])
+
+        result = pr_manager._create_pr_body(
+            todo_item="Test task", acceptance_criteria=["Criterion 1"]
         )
 
-        result = pr_manager.finalize_changes(
-            todo_item="Test task", acceptance_criteria=["Criteria 1", "Criteria 2"]
+        # Verify required sections are present
+        assert "## Changes Made" in result
+        assert "## Implementation Details" in result
+        assert "## Requirements Met" in result
+        assert "## Testing" in result
+        assert "## Code Quality" in result
+        assert "## Security Considerations" in result
+
+        # Verify content
+        assert "Criterion 1" in result
+        assert "test.py" in result
+        assert "[x]" in result  # Checked boxes
+
+    def test_finalize_changes_sync_failure(self, pr_manager):
+        """Test handling of sync failure."""
+        pr_manager.tools.execute_tool.return_value = ToolResponse(
+            status=ToolResponseStatus.ERROR, error="Failed to sync"
         )
 
-        assert result is True
-
-    @patch("src.pr_management.PRManager._all_tests_pass")
-    def test_finalize_changes_tests_fail(self, mock_all_tests_pass, pr_manager):
-        """Test PR finalization when tests fail."""
-        mock_all_tests_pass.return_value = False
-        pr_manager.tools.execute_tool = Mock(
-            return_value=ToolResponse(
-                status=ToolResponseStatus.SUCCESS, data={"has_conflicts": False}
-            )
-        )
-        pr_manager.phase_manager.run_phase_with_recovery = Mock(return_value=False)
-
-        result = pr_manager.finalize_changes(
-            todo_item="Test task", acceptance_criteria=["Criteria 1", "Criteria 2"]
-        )
-
+        result = pr_manager.finalize_changes("Test task", ["Criterion 1"])
         assert result is False
+        pr_manager.logger.log_error.assert_called_once()
+
+    def test_finalize_changes_pr_creation_failure(self, pr_manager):
+        """Test handling of PR creation failure."""
+        pr_manager.tools.execute_tool.side_effect = [
+            ToolResponse(
+                status=ToolResponseStatus.SUCCESS, data={"has_conflicts": False}
+            ),  # sync
+            ToolResponse(
+                status=ToolResponseStatus.ERROR, error="PR creation failed"
+            ),  # create PR
+        ]
+        pr_manager._all_tests_pass = Mock(return_value=True)
+
+        result = pr_manager.finalize_changes("Test task", ["Criterion 1"])
+        assert result is False
+        pr_manager.logger.log_error.assert_called_once()
