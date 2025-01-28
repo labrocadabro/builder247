@@ -67,29 +67,36 @@ class ToolExecutor:
         Returns:
             Tool execution response
         """
-        result = self.tools.execute_tool(tool_call)
+        try:
+            result = self.tools.execute_tool(tool_call)
 
-        # Track tool execution
-        self._tool_history.append(
-            {
-                "name": tool_call["name"],
-                "parameters": tool_call.get("parameters", {}),
-                "status": result.status,
-                "error": (
-                    result.error
-                    if result.status != ToolResponseStatus.SUCCESS
-                    else None
-                ),
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
+            # Track tool execution
+            self._tool_history.append(
+                {
+                    "name": tool_call["name"],
+                    "parameters": tool_call.get("parameters", {}),
+                    "status": result.status,
+                    "error": (
+                        result.error
+                        if result.status != ToolResponseStatus.SUCCESS
+                        else None
+                    ),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
-        if result.status == ToolResponseStatus.SUCCESS:
-            # Track file changes
-            if "file" in result.metadata:
-                self._track_file_change(result.metadata["file"])
+            if result.status == ToolResponseStatus.SUCCESS:
+                # Track file changes
+                if "file" in result.metadata:
+                    self._track_file_change(result.metadata["file"])
 
-        return result
+            return result
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.log_error("execute_tool", error_msg)
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR, error=error_msg, data=None
+            )
 
     def _track_file_change(self, file_path: str) -> None:
         """Track a file change for analysis."""
