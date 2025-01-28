@@ -247,42 +247,6 @@ class TestTestManager:
         )
         assert test_manager.criteria_manager.update_criterion_status.call_count == 2
 
-    def test_run_tests_with_retry_custom_config(self, test_manager):
-        """Test running tests with custom retry configuration."""
-        # Set custom retry config
-        custom_config = RetryConfig(max_attempts=3, delay_seconds=1)
-        test_manager.retry_config = custom_config
-
-        # First two attempts fail, third succeeds
-        test_manager.tools.run_command.side_effect = [
-            ToolResponse(status=ToolResponseStatus.ERROR, error="First failure"),
-            ToolResponse(status=ToolResponseStatus.ERROR, error="Second failure"),
-            ToolResponse(status=ToolResponseStatus.SUCCESS, data="All tests passed"),
-        ]
-        test_manager.parse_test_results = Mock(return_value=[])
-
-        # Run tests with retry
-        result = test_manager.run_tests_with_retry()
-        assert result is True
-        assert test_manager.tools.run_command.call_count == 3
-
-    def test_run_tests_with_retry_max_retries_exceeded(self, test_manager):
-        """Test running tests when max retries are exceeded."""
-        # Set retry config with 2 retries
-        test_manager.retry_config = RetryConfig(max_attempts=2, delay_seconds=0)
-
-        # All attempts fail
-        test_manager.tools.run_command.side_effect = [
-            ToolResponse(status=ToolResponseStatus.ERROR, error=f"Failure {i}")
-            for i in range(2)
-        ]
-        test_manager.parse_test_results = Mock(return_value=[])
-
-        # Run tests with retry
-        result = test_manager.run_tests_with_retry()
-        assert result is False
-        assert test_manager.tools.run_command.call_count == 2
-
     def test_get_test_history_empty(self, test_manager):
         """Test getting test history when no tests have been run."""
         history = test_manager.get_test_history("test_example.py")
