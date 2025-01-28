@@ -1,11 +1,11 @@
 """
-Error recovery and retry logic for tools.
+Core retry functionality for error recovery.
 """
 
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, Callable, Type, List, TypeVar
+from typing import Optional, Callable, Type, List, TypeVar, Any
 
 from src.types import ToolResponse, ToolResponseStatus
 
@@ -14,7 +14,7 @@ T = TypeVar("T")
 
 @dataclass
 class RetryConfig:
-    """Configuration for retry behavior."""
+    """Basic retry configuration."""
 
     max_attempts: int = 3
     delay_seconds: float = 1.0
@@ -28,15 +28,25 @@ class RetryConfig:
 def with_retry(
     operation: Callable[[], T],
     config: Optional[RetryConfig] = None,
-    cleanup: Optional[Callable[[], None]] = None,
     logger: Optional[logging.Logger] = None,
 ) -> T:
     """Execute operation with retries.
 
+    This provides core retry functionality:
+    - Maximum attempts
+    - Delay between attempts
+    - Exception filtering
+    - Basic logging
+
+    For module-specific retry behavior:
+    - Use custom retry loops in the module
+    - Implement cleanup in the module
+    - Handle specific success conditions in the module
+    - Track module-specific state separately
+
     Args:
         operation: Function to execute
         config: Optional retry configuration
-        cleanup: Optional cleanup function to call between retries
         logger: Optional logger instance
 
     Returns:
@@ -78,16 +88,10 @@ def with_retry(
                 raise last_error
             raise RuntimeError(f"Operation failed after {config.max_attempts} attempts")
 
-        # Handle retry
+        # Log retry attempt
         logger.warning(
-            f"Attempt {attempt + 1} failed: {error}. "
+            f"Attempt {attempt + 1}/{config.max_attempts} failed: {error}. "
             f"Retrying in {config.delay_seconds}s"
         )
-
-        if cleanup:
-            try:
-                cleanup()
-            except Exception as ce:
-                logger.warning(f"Cleanup between retries failed: {ce}")
 
         time.sleep(config.delay_seconds)

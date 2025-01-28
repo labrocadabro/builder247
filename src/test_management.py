@@ -4,12 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
-import time
 
 from .tools import ToolImplementations
-from .tools.types import ToolResponseStatus
+from .tools.types import ToolResponse, ToolResponseStatus
 from .utils.monitoring import ToolLogger
-from .utils.retry import RetryConfig
+from .utils.retry import RetryConfig, with_retry
 from .acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
 
 
@@ -61,6 +60,55 @@ class TestManager:
         self.parse_test_results = parse_test_results
         self._recent_changes = []
         self._test_history = []
+        self._current_test_state = None
+
+    def _cleanup_test_state(self):
+        """Clean up test state between retries."""
+        try:
+            # Reset any test-specific state
+            self._current_test_state = None
+
+            # Clean up any temporary test files or artifacts
+            for temp_file in self.workspace_dir.glob("**/.pytest_cache"):
+                if temp_file.is_dir():
+                    for f in temp_file.iterdir():
+                        try:
+                            if f.is_file():
+                                f.unlink()
+                        except Exception as e:
+                            self.logger.log_error("cleanup_test_state", str(e))
+
+        except Exception as e:
+            self.logger.log_error("cleanup_test_state", str(e))
+
+    def _run_tests(self) -> ToolResponse:
+        """Run tests and process results.
+
+        Returns:
+            ToolResponse with test execution results
+        """
+        result = self.tools.run_command("python -m pytest --verbose")
+
+        # Store current state for potential cleanup
+        self._current_test_state = {
+            "result": result,
+            "changes": self._recent_changes.copy(),
+        }
+
+        if result.status == ToolResponseStatus.SUCCESS:
+            return result
+
+        # Parse and record test failures
+        if self.parse_test_results:
+            test_results = self.parse_test_results(result.data)
+            self._record_test_results(
+                test_results,
+                self._recent_changes,
+                self._current_test_state.get("commit_id"),
+                self._current_test_state.get("commit_message"),
+            )
+
+        return result
 
     def run_tests_with_retry(
         self, commit_id: Optional[str] = None, commit_message: Optional[str] = None
@@ -74,39 +122,25 @@ class TestManager:
         Returns:
             True if tests pass, False otherwise
         """
-        for attempt in range(self.retry_config.max_attempts):
-            try:
-                result = self.tools.run_command("python -m pytest --verbose")
-                if result.status == ToolResponseStatus.SUCCESS:
-                    return True
+        # Store test context
+        self._current_test_state = {
+            "commit_id": commit_id,
+            "commit_message": commit_message,
+        }
 
-                # Only record failures on the last attempt
-                if attempt == self.retry_config.max_attempts - 1:
-                    if self.parse_test_results:
-                        # Parse test output using provided callback
-                        test_results = self.parse_test_results(result.data)
-                        self._record_test_results(
-                            test_results,
-                            self._recent_changes,
-                            commit_id,
-                            commit_message,
-                        )
-                    self.logger.error("Max retries exceeded. Tests continue to fail.")
+        try:
+            result = with_retry(
+                operation=self._run_tests,
+                config=self.retry_config,
+                logger=self.logger,
+            )
+            return result.status == ToolResponseStatus.SUCCESS
 
-                # Log retry attempt
-                if attempt < self.retry_config.max_attempts - 1:
-                    self.logger.log_error(
-                        "run_tests",
-                        f"Test run failed (attempt {attempt + 1}/{self.retry_config.max_attempts}). Retrying...",
-                    )
-                    time.sleep(self.retry_config.delay_seconds)
-
-            except Exception as e:
-                self.logger.log_error("run_tests", str(e))
-                if attempt < self.retry_config.max_attempts - 1:
-                    time.sleep(self.retry_config.delay_seconds)
-
-        return False
+        except Exception as e:
+            self.logger.log_error("run_tests", str(e))
+            return False
+        finally:
+            self._cleanup_test_state()
 
     def all_tests_pass(self) -> bool:
         """Check if all tests are passing."""

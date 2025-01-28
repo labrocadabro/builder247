@@ -45,15 +45,37 @@ class GitTools:
             "GIT_PASSWORD": self.token,
         }
 
-        # Retry configuration
+        # Configure retry behavior
         self.retry_config = RetryConfig(
             max_attempts=3,
             delay_seconds=1.0,
-            retry_on=[requests.RequestException, IOError],
+            retry_on=[requests.RequestException, IOError, GitCommandError],
         )
 
         self.logger = ToolLogger()
         self.repo = None
+
+    def _cleanup_git_state(self):
+        """Clean up git state after failed operations."""
+        if not self.git_dir.exists():
+            return
+
+        try:
+            if self.repo:
+                # Reset any uncommitted changes
+                self.repo.git.reset("--hard")
+                # Clean untracked files
+                self.repo.git.clean("-fd")
+        except Exception as e:
+            self.logger.log_error("cleanup_git_state", str(e))
+
+    def _retry_with_cleanup(self, operation):
+        """Execute git operation with cleanup between retries."""
+        try:
+            return with_retry(operation, config=self.retry_config, logger=self.logger)
+        except:  # noqa: E722
+            self._cleanup_git_state()
+            raise
 
     def can_access_repository(self, repo_url: str) -> bool:
         """Check if a git repository is accessible.
@@ -197,32 +219,32 @@ class GitTools:
         Returns:
             ToolResponse indicating success/failure
         """
-        try:
 
-            def commit_operation():
-                repo = Repo(self.git_dir)
-                if file_path:
-                    file_path_full = self.git_dir / file_path
-                    if not file_path_full.exists():
-                        raise FileNotFoundError(f"File not found: {file_path}")
-                    repo.git.add(file_path)
-                else:
-                    repo.git.add(A=True)
+        def commit_operation():
+            if not self.repo:
+                self.repo = Repo(self.git_dir)
 
-                repo.git.commit(m=message)
-                origin = repo.remotes.origin
-                current_branch = repo.active_branch.name
-                with repo.git.custom_environment(**self.git_env):
-                    repo.git.push("--set-upstream", origin, current_branch)
-                return True
+            if file_path:
+                file_path_full = self.git_dir / file_path
+                if not file_path_full.exists():
+                    raise FileNotFoundError(f"File not found: {file_path}")
+                self.repo.git.add(file_path)
+            else:
+                self.repo.git.add(A=True)
 
-            with_retry(commit_operation, config=self.retry_config)
+            self.repo.git.commit(m=message)
+            origin = self.repo.remotes.origin
+            current_branch = self.repo.active_branch.name
+            with self.repo.git.custom_environment(**self.git_env):
+                self.repo.git.push("--set-upstream", origin, current_branch)
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
                 data={"message": message},
                 metadata={"git_dir": str(self.git_dir), "file": file_path},
             )
 
+        try:
+            return self._retry_with_cleanup(commit_operation)
         except Exception as e:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
@@ -443,42 +465,43 @@ class GitTools:
         Returns:
             ToolResponse indicating success/failure and any conflicts
         """
+
+        def sync_operation():
+            if not self.git_dir.exists():
+                self.repo = Repo.clone_from(fork_url, self.git_dir, env=self.git_env)
+            else:
+                self.repo = Repo(self.git_dir)
+
+            origin = self.repo.remotes.origin
+
+            # Add upstream if needed
+            if "upstream" not in [r.name for r in self.repo.remotes]:
+                self.repo.create_remote("upstream", repo_url)
+            upstream = self.repo.remotes.upstream
+
+            # Sync with upstream
+            with self.repo.git.custom_environment(**self.git_env):
+                upstream.fetch()
+                self.repo.git.checkout("main")
+                try:
+                    self.repo.git.merge("upstream/main")
+                    origin.push()
+                    return ToolResponse(
+                        status=ToolResponseStatus.SUCCESS,
+                        data={"has_conflicts": False},
+                        metadata={"repo_url": repo_url, "fork_url": fork_url},
+                    )
+                except GitCommandError as e:
+                    if "CONFLICT" in str(e):
+                        return ToolResponse(
+                            status=ToolResponseStatus.SUCCESS,
+                            data={"has_conflicts": True},
+                            metadata={"repo_url": repo_url, "fork_url": fork_url},
+                        )
+                    raise
+
         try:
-
-            def sync_operation():
-                repo = None
-                if not self.git_dir.exists():
-                    repo = Repo.clone_from(fork_url, self.git_dir, env=self.git_env)
-                else:
-                    repo = Repo(self.git_dir)
-
-                origin = repo.remotes.origin
-
-                # Add upstream if needed
-                if "upstream" not in [r.name for r in repo.remotes]:
-                    repo.create_remote("upstream", repo_url)
-                upstream = repo.remotes.upstream
-
-                # Sync with upstream
-                with repo.git.custom_environment(**self.git_env):
-                    upstream.fetch()
-                    repo.git.checkout("main")
-                    try:
-                        repo.git.merge("upstream/main")
-                        origin.push()
-                        return {"has_conflicts": False}
-                    except GitCommandError as e:
-                        if "CONFLICT" in str(e):
-                            return {"has_conflicts": True}
-                        raise
-
-            result = with_retry(sync_operation, config=self.retry_config)
-            return ToolResponse(
-                status=ToolResponseStatus.SUCCESS,
-                data=result,
-                metadata={"repo_url": repo_url, "fork_url": fork_url},
-            )
-
+            return self._retry_with_cleanup(sync_operation)
         except Exception as e:
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,

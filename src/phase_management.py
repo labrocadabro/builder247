@@ -9,6 +9,7 @@ from .tools import ToolImplementations
 from .tools.types import ToolResponse, ToolResponseStatus
 from .tools.execution import ToolExecutor
 from .utils.monitoring import ToolLogger
+from .utils.retry import RetryConfig, with_retry
 from .acceptance_criteria import CriteriaStatus
 
 
@@ -53,9 +54,88 @@ class PhaseManager:
         """
         self.tools = tools
         self.logger = logger
-        self.max_retries = max_retries
         self.execute_phase = execute_phase
         self.tool_executor = ToolExecutor(tools, logger)
+
+        # Configure retry behavior
+        self.retry_config = RetryConfig(
+            max_attempts=max_retries,
+            delay_seconds=1.0,
+            retry_on=[Exception],  # Retry on any exception for phases
+        )
+
+        self._current_phase_state = None
+        self._current_context = None
+
+    def _cleanup_phase_state(self):
+        """Clean up phase state between retries."""
+        try:
+            if self._current_phase_state:
+                # Reset any in-progress tool executions
+                self.tool_executor.reset()
+
+                # Log the cleanup for debugging
+                phase = self._current_phase_state.phase
+                attempt = self._current_phase_state.attempts
+                self.logger.log_error(
+                    "phase_cleanup",
+                    f"Cleaning up phase {phase} after attempt {attempt}",
+                )
+        except Exception as e:
+            self.logger.log_error("phase_cleanup", str(e))
+
+    def _execute_phase(self) -> Dict:
+        """Execute a single phase attempt.
+
+        Returns:
+            Phase results dictionary
+        """
+        if not self.execute_phase:
+            self.logger.log_error(
+                "run_phase",
+                "No phase execution callback provided",
+                {"phase": self._current_phase_state.phase},
+            )
+            return {
+                "success": False,
+                "error": "No phase execution callback",
+                "planned_changes": [],
+            }
+
+        # Execute phase using callback
+        response_text, tool_calls = self.execute_phase(
+            self._current_context, self._current_phase_state.phase
+        )
+
+        # Check for task abandonment
+        if "ABANDON_TASK:" in response_text:
+            self._handle_task_abandoned(
+                response_text, self._current_context["criteria"]
+            )
+            return {
+                "success": False,
+                "error": "Task abandoned",
+                "planned_changes": [],
+            }
+
+        # Execute tools
+        results = self._execute_tools(tool_calls)
+        if not results:
+            self._current_phase_state.last_error = (
+                self._current_phase_state.last_error or "Tool execution failed"
+            )
+            raise ValueError(self._current_phase_state.last_error)
+
+        # Add criteria to results for validation
+        results["criteria"] = self._current_context["criteria"]
+
+        # Validate phase completion based on phase type
+        results = self._validate_phase(self._current_phase_state.phase, results)
+        if not results:
+            raise ValueError("Phase validation failed")
+
+        results["success"] = True
+        return results
 
     def run_phase_with_recovery(
         self,
@@ -71,68 +151,26 @@ class PhaseManager:
         Returns:
             Phase results if successful, failure dict if unsuccessful
         """
-        while phase_state.attempts < self.max_retries:
-            try:
-                if not self.execute_phase:
-                    self.logger.log_error(
-                        "run_phase",
-                        "No phase execution callback provided",
-                        {"phase": phase_state.phase},
-                    )
-                    return {
-                        "success": False,
-                        "error": "No phase execution callback",
-                        "planned_changes": [],
-                    }
+        self._current_phase_state = phase_state
+        self._current_context = context
 
-                # Execute phase using callback
-                response_text, tool_calls = self.execute_phase(
-                    context, phase_state.phase
-                )
-
-                # Check for task abandonment
-                if "ABANDON_TASK:" in response_text:
-                    self._handle_task_abandoned(response_text, context["criteria"])
-                    return {
-                        "success": False,
-                        "error": "Task abandoned",
-                        "planned_changes": [],
-                    }
-
-                # Execute tools
-                self._current_phase_state = phase_state
-                results = self._execute_tools(tool_calls)
-                self._current_phase_state = None
-                if not results:
-                    phase_state.last_error = (
-                        phase_state.last_error or "Tool execution failed"
-                    )
-                    phase_state.attempts += 1
-                    continue
-
-                # Add criteria to results for validation
-                results["criteria"] = context["criteria"]
-
-                # Validate phase completion based on phase type
-                results = self._validate_phase(phase_state.phase, results)
-                if results:
-                    results["success"] = True
-                    return results
-
-                # Phase validation failed, increment attempts and retry
-                phase_state.attempts += 1
-
-            except Exception as e:
-                phase_state.last_error = str(e)
-                phase_state.attempts += 1
-
-        # Max retries exceeded
-        self._handle_phase_failed(phase_state, context["criteria"])
-        return {
-            "success": False,
-            "error": phase_state.last_error or "Phase validation failed",
-            "planned_changes": [],
-        }
+        try:
+            return with_retry(
+                operation=self._execute_phase,
+                config=self.retry_config,
+                logger=self.logger,
+            )
+        except Exception as e:
+            self._handle_phase_failed(phase_state, context["criteria"])
+            return {
+                "success": False,
+                "error": str(e),
+                "planned_changes": [],
+            }
+        finally:
+            self._cleanup_phase_state()
+            self._current_phase_state = None
+            self._current_context = None
 
     def _execute_tools(self, tool_calls: List[Dict]) -> Optional[Dict]:
         """Execute a series of tool calls and collect results."""
