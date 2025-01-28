@@ -1,4 +1,4 @@
-"""Git operations and utilities."""
+"""Git tools for repository management."""
 
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -376,14 +376,14 @@ class GitTools:
                 metadata={"error_type": e.__class__.__name__, "file": file_path},
             )
 
-    def create_merge_commit(self, message: str) -> Optional[str]:
+    def create_merge_commit(self, message: str) -> ToolResponse:
         """Create a merge commit after resolving conflicts.
 
         Args:
             message: Commit message
 
         Returns:
-            Commit ID if successful, None otherwise
+            ToolResponse containing commit ID if successful
         """
         try:
             if not self.repo:
@@ -391,15 +391,27 @@ class GitTools:
 
             # Check if there are any staged changes
             if not self.repo.index.diff("HEAD"):
-                return None
+                return ToolResponse(
+                    status=ToolResponseStatus.SUCCESS,
+                    data={"commit_id": None},
+                    metadata={"message": "No changes to commit"},
+                )
 
             # Create commit
             commit = self.repo.index.commit(message)
-            return commit.hexsha
+            return ToolResponse(
+                status=ToolResponseStatus.SUCCESS,
+                data={"commit_id": commit.hexsha},
+                metadata={"message": message},
+            )
 
         except Exception as e:
             self.logger.log_error("create_merge_commit", str(e))
-            return None
+            return ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                error=str(e),
+                metadata={"error_type": e.__class__.__name__},
+            )
 
     def sync_fork(self, repo_url: str, fork_url: str) -> ToolResponse:
         """Sync fork with upstream repository.

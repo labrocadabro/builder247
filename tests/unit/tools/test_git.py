@@ -231,3 +231,136 @@ def test_retry_exhaustion(git_tools):
         assert response.status == ToolResponseStatus.ERROR
         assert "Persistent network error" in response.error
         assert mock_get.call_count == 3  # Max retries
+
+
+@patch("src.tools.git.Repo")
+def test_check_for_conflicts_success(mock_repo, git_tools):
+    """Test successful conflict check."""
+    # Mock unmerged blobs
+    mock_blob = Mock()
+    mock_blob.a_path = "test.py"
+    mock_repo = mock_repo.return_value
+    mock_repo.index.unmerged_blobs.return_value = [mock_blob]
+
+    response = git_tools.check_for_conflicts()
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["has_conflicts"] is True
+    assert response.data["conflicting_files"] == ["test.py"]
+
+
+@patch("src.tools.git.Repo")
+def test_check_for_conflicts_no_conflicts(mock_repo, git_tools):
+    """Test conflict check with no conflicts."""
+    mock_repo = mock_repo.return_value
+    mock_repo.index.unmerged_blobs.return_value = []
+
+    response = git_tools.check_for_conflicts()
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["has_conflicts"] is False
+    assert response.data["conflicting_files"] == []
+
+
+@patch("src.tools.git.Repo")
+def test_get_conflict_info_success(mock_repo, git_tools):
+    """Test getting conflict information."""
+    # Mock unmerged blobs with content
+    mock_blob = Mock()
+    mock_blob.a_path = "test.py"
+
+    # Create mock data streams that properly decode
+    ancestor_stream = Mock()
+    ancestor_stream.read.return_value = b"ancestor content"
+    our_stream = Mock()
+    our_stream.read.return_value = b"our content"
+    their_stream = Mock()
+    their_stream.read.return_value = b"their content"
+
+    mock_entries = {
+        1: Mock(data_stream=ancestor_stream),
+        2: Mock(data_stream=our_stream),
+        3: Mock(data_stream=their_stream),
+    }
+    mock_blob.entries = mock_entries
+
+    mock_repo = mock_repo.return_value
+    mock_repo.index.unmerged_blobs.return_value = [mock_blob]
+
+    response = git_tools.get_conflict_info()
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert "test.py" in response.data["conflicts"]
+    conflict_content = response.data["conflicts"]["test.py"]["content"]
+    assert conflict_content["ancestor"] == "ancestor content"
+    assert conflict_content["ours"] == "our content"
+    assert conflict_content["theirs"] == "their content"
+
+
+@patch("src.tools.git.Repo")
+def test_resolve_conflict_success(mock_repo, git_tools, mock_workspace):
+    """Test successful conflict resolution."""
+    # Create git workspace directory
+    git_workspace = mock_workspace / "git_workspace"
+    git_workspace.mkdir(parents=True)
+    test_file = git_workspace / "test.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+
+    mock_repo = mock_repo.return_value
+    resolution = "resolved content"
+    file_path = "test.py"
+
+    response = git_tools.resolve_conflict(file_path, resolution)
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["resolved"] is True
+    assert response.metadata["file"] == file_path
+    mock_repo.index.add.assert_called_once_with([file_path])
+
+    # Verify file was written with resolution
+    assert test_file.read_text() == resolution
+
+
+@patch("src.tools.git.Repo")
+def test_create_merge_commit_success(mock_repo, git_tools):
+    """Test successful merge commit creation."""
+    mock_repo = mock_repo.return_value
+    mock_repo.index.diff.return_value = ["changed_file"]  # Simulate changes
+    mock_commit = Mock()
+    mock_commit.hexsha = "abc123"
+    mock_repo.index.commit.return_value = mock_commit
+
+    response = git_tools.create_merge_commit("Test merge commit")
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["commit_id"] == "abc123"
+    assert response.metadata["message"] == "Test merge commit"
+    mock_repo.index.commit.assert_called_once_with("Test merge commit")
+
+
+@patch("src.tools.git.Repo")
+def test_create_merge_commit_no_changes(mock_repo, git_tools):
+    """Test merge commit with no changes."""
+    mock_repo = mock_repo.return_value
+    mock_repo.index.diff.return_value = []  # No changes
+
+    response = git_tools.create_merge_commit("Test merge commit")
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["commit_id"] is None
+    assert response.metadata["message"] == "No changes to commit"
+    mock_repo.index.commit.assert_not_called()
+
+
+@patch("src.tools.git.Repo")
+def test_create_merge_commit_failure(mock_repo, git_tools):
+    """Test merge commit failure."""
+    mock_repo = mock_repo.return_value
+    mock_repo.index.diff.return_value = ["changed_file"]
+    mock_repo.index.commit.side_effect = Exception("Commit failed")
+
+    response = git_tools.create_merge_commit("Test merge commit")
+
+    assert response.status == ToolResponseStatus.ERROR
+    assert "Commit failed" in response.error
+    assert response.metadata["error_type"] == "Exception"
