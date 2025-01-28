@@ -2,7 +2,10 @@
 
 import pytest
 
-from src.acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
+from src.acceptance_criteria import (
+    AcceptanceCriteriaManager,
+    CriteriaStatus,
+)
 
 
 @pytest.fixture
@@ -83,20 +86,61 @@ def test_add_implementation_file(criteria_manager):
 
 
 def test_get_unverified_criteria(criteria_manager):
-    """Test getting unverified criteria."""
-    # Add some criteria
-    criteria_manager.add_criterion("Criterion 1")
-    criteria_manager.add_criterion("Criterion 2")
-    criteria_manager.add_criterion("Criterion 3")
+    """Test getting unverified criteria.
 
-    # Update statuses
-    criteria_manager.update_criterion_status("Criterion 1", CriteriaStatus.VERIFIED)
-    criteria_manager.update_criterion_status("Criterion 2", CriteriaStatus.IN_PROGRESS)
+    Tests that:
+    1. Empty criteria list returns empty unverified list
+    2. All unverified states (NOT_STARTED, IN_PROGRESS, IMPLEMENTED, TESTING, FAILED, BLOCKED)
+       are included in unverified list
+    3. VERIFIED state is not included in unverified list
+    4. Order of criteria in result doesn't matter
+    """
+    # Test empty criteria list
+    assert len(criteria_manager.get_unverified_criteria()) == 0
 
+    # Add criteria in different states
+    states_to_test = {
+        "not_started": CriteriaStatus.NOT_STARTED,
+        "in_progress": CriteriaStatus.IN_PROGRESS,
+        "implemented": CriteriaStatus.IMPLEMENTED,
+        "testing": CriteriaStatus.TESTING,
+        "failed": CriteriaStatus.FAILED,
+        "blocked": CriteriaStatus.BLOCKED,
+        "verified": CriteriaStatus.VERIFIED,
+    }
+
+    # Add and update criteria
+    for name, status in states_to_test.items():
+        criterion_name = f"Criterion_{name}"
+        criteria_manager.add_criterion(criterion_name)
+        criteria_manager.update_criterion_status(criterion_name, status)
+
+    # Get unverified criteria
     unverified = criteria_manager.get_unverified_criteria()
-    assert len(unverified) == 2
-    assert "Criterion 2" in unverified
-    assert "Criterion 3" in unverified
+
+    # Verify correct criteria are returned
+    assert len(unverified) == len(states_to_test) - 1  # All except VERIFIED
+    assert "Criterion_verified" not in unverified
+
+    # Verify each unverified state is included
+    expected_unverified = {
+        f"Criterion_{name}"
+        for name, status in states_to_test.items()
+        if status != CriteriaStatus.VERIFIED
+    }
+    assert set(unverified) == expected_unverified
+
+    # Verify changing a criterion from verified to unverified includes it
+    criteria_manager.update_criterion_status(
+        "Criterion_verified", CriteriaStatus.FAILED, "Test failed"
+    )
+    assert "Criterion_verified" in criteria_manager.get_unverified_criteria()
+
+    # Verify changing an unverified criterion to verified excludes it
+    criteria_manager.update_criterion_status(
+        "Criterion_failed", CriteriaStatus.VERIFIED, "Test passed"
+    )
+    assert "Criterion_failed" not in criteria_manager.get_unverified_criteria()
 
 
 def test_get_implementation_status(criteria_manager):
@@ -169,3 +213,42 @@ def test_get_blocking_criteria(criteria_manager):
     blocking = criteria_manager.get_blocking_criteria("Criterion 3")
     assert len(blocking) == 1
     assert "Criterion 2" in blocking
+
+
+def test_get_failure_history(criteria_manager):
+    """Test getting failure history for a criterion."""
+    # Add a criterion
+    criteria_manager.add_criterion("criterion1")
+
+    # Record some test failures
+    criteria_manager.record_test_failure(
+        criterion="criterion1",
+        test_file="test1.py",
+        test_name="test_func",
+        error_message="First failure",
+        stack_trace="Stack trace 1",
+        related_changes=["src/module1.py"],
+    )
+
+    criteria_manager.record_test_failure(
+        criterion="criterion1",
+        test_file="test2.py",
+        test_name="test_other",
+        error_message="Second failure",
+        stack_trace="Stack trace 2",
+        related_changes=["src/module2.py"],
+    )
+
+    # Get failure history
+    history = criteria_manager.get_failure_history("criterion1")
+
+    # Verify history contents
+    assert len(history) == 2
+    assert history[0]["test_file"] == "test1.py"
+    assert history[0]["error_message"] == "First failure"
+    assert history[1]["test_file"] == "test2.py"
+    assert history[1]["error_message"] == "Second failure"
+
+    # Test with non-existent criterion
+    with pytest.raises(ValueError, match="Unknown criterion"):
+        criteria_manager.get_failure_history("nonexistent")

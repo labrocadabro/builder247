@@ -29,7 +29,6 @@ class TestFailure:
     stack_trace: str
     timestamp: datetime
     related_changes: List[str]  # Files changed in the commit being tested
-    failure_pattern: Optional[str] = None  # Identified pattern of failure
 
 
 @dataclass
@@ -59,9 +58,6 @@ class AcceptanceCriteriaManager:
         """
         self.workspace_dir = workspace_dir
         self.criteria: Dict[str, CriterionInfo] = {}
-        self.failure_patterns: Dict[str, List[TestFailure]] = (
-            {}
-        )  # Pattern -> Similar failures
 
     def add_criterion(
         self, criterion: str, dependencies: Optional[List[str]] = None
@@ -177,7 +173,6 @@ class AcceptanceCriteriaManager:
         error_message: str,
         stack_trace: str,
         related_changes: List[str],
-        failure_pattern: Optional[str] = None,
     ) -> None:
         """Record a test failure for a criterion.
 
@@ -188,7 +183,6 @@ class AcceptanceCriteriaManager:
             error_message: Error message from the test
             stack_trace: Stack trace of the failure
             related_changes: Files changed in the commit being tested
-            failure_pattern: Optional identified pattern of failure
 
         Raises:
             ValueError: If criterion doesn't exist
@@ -203,7 +197,6 @@ class AcceptanceCriteriaManager:
             stack_trace=stack_trace,
             timestamp=datetime.now(),
             related_changes=related_changes,
-            failure_pattern=failure_pattern,
         )
 
         info = self.criteria[criterion]
@@ -233,106 +226,10 @@ class AcceptanceCriteriaManager:
                 "error_message": failure.error_message,
                 "stack_trace": failure.stack_trace,
                 "related_changes": failure.related_changes,
-                "pattern": failure.failure_pattern,
             }
             failures.append(failure_info)
 
         return failures
-
-    def get_similar_failures(
-        self, criterion: str, current_failure: TestFailure
-    ) -> List[TestFailure]:
-        """Get similar historical failures across all criteria.
-
-        Args:
-            criterion: The criterion with the current failure
-            current_failure: The current failure to find similar ones for
-
-        Returns:
-            List of similar historical failures
-        """
-        similar_failures = []
-
-        # If we have a pattern for this failure, get all failures with same pattern
-        if (
-            current_failure.failure_pattern
-            and current_failure.failure_pattern in self.failure_patterns
-        ):
-            similar_failures.extend(
-                self.failure_patterns[current_failure.failure_pattern]
-            )
-
-        # Also look for failures with similar error messages or stack traces
-        for other_criterion, info in self.criteria.items():
-            if other_criterion == criterion:
-                continue
-            for failure in info.test_failures:
-                if (
-                    self._calculate_similarity(
-                        current_failure.error_message, failure.error_message
-                    )
-                    > 0.8
-                    or self._calculate_similarity(
-                        current_failure.stack_trace, failure.stack_trace
-                    )
-                    > 0.8
-                ):
-                    similar_failures.append(failure)
-
-        return similar_failures
-
-    def _analyze_failure_pattern(self, criterion: str, failure: TestFailure) -> None:
-        """Analyze a failure to identify patterns.
-
-        This is a basic implementation that could be enhanced with more sophisticated
-        pattern recognition.
-
-        Args:
-            criterion: The criterion with the failure
-            failure: The failure to analyze
-        """
-        # Example patterns - this could be made more sophisticated
-        patterns = {
-            "assertion_error": "AssertionError" in failure.error_message,
-            "type_error": "TypeError" in failure.error_message,
-            "attribute_error": "AttributeError" in failure.error_message,
-            "import_error": "ImportError" in failure.error_message,
-            "key_error": "KeyError" in failure.error_message,
-            "index_error": "IndexError" in failure.error_message,
-        }
-
-        for pattern, matches in patterns.items():
-            if matches:
-                failure.failure_pattern = pattern
-                if pattern not in self.failure_patterns:
-                    self.failure_patterns[pattern] = []
-                self.failure_patterns[pattern].append(failure)
-                break
-
-    def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """Calculate similarity between two strings.
-
-        This is a basic implementation using string matching.
-        Could be enhanced with more sophisticated similarity metrics.
-
-        Args:
-            text1: First string
-            text2: Second string
-
-        Returns:
-            Similarity score between 0 and 1
-        """
-        # Simple implementation - could be made more sophisticated
-        words1 = set(text1.lower().split())
-        words2 = set(text2.lower().split())
-
-        if not words1 or not words2:
-            return 0.0
-
-        intersection = words1.intersection(words2)
-        union = words1.union(words2)
-
-        return len(intersection) / len(union)
 
     def get_criterion_status(self, criterion: str) -> Dict:
         """Get the current status of a criterion.
@@ -364,7 +261,6 @@ class AcceptanceCriteriaManager:
                 "error_message": info.current_failure.error_message,
                 "timestamp": info.current_failure.timestamp,
                 "related_changes": info.current_failure.related_changes,
-                "pattern": info.current_failure.failure_pattern,
             }
 
         return status_info
