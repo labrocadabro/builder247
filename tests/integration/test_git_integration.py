@@ -4,11 +4,13 @@ import pytest
 import os
 from pathlib import Path
 import tempfile
-
+from dotenv import load_dotenv
 from src.tools.git import GitTools
 from src.tools.types import ToolResponseStatus
 from tests.utils.mock_tools import MockSecurityContext
 
+# Load environment variables from .env file
+load_dotenv()
 
 # Test repository configuration
 TEST_REPO_OWNER = os.getenv("TEST_REPO_OWNER", "builder247-test")
@@ -64,7 +66,7 @@ class TestGitIntegration:
     def test_git_operations(self):
         """Test basic git operations."""
         # Initialize repo
-        result = self.git_tools.init_repo()
+        result = self.git_tools.init_repo(self.REPO_URL)
         assert result.status == ToolResponseStatus.SUCCESS
 
         # Create and add file
@@ -158,11 +160,17 @@ class TestGitIntegration:
 
     def test_workspace_isolation(self):
         """Test workspace isolation."""
-        # Attempt to create file outside workspace
+        # Initialize repo first
+        result = self.git_tools.init_repo(self.REPO_URL)
+        assert result.status == ToolResponseStatus.SUCCESS
+
+        # Attempt to add file outside workspace
         test_file = Path("/tmp/test.txt")
+        test_file.write_text("test content")  # Create the file
+
+        # Should raise error when trying to add file outside workspace
         with pytest.raises(ValueError, match="must be within workspace"):
-            self.git_tools.git_ssh_identity_file = test_file
-            self.git_tools._setup_ssh_key()
+            self.git_tools.add_file(test_file)
 
 
 if __name__ == "__main__":

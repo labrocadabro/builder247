@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 from datetime import datetime
-
+from dotenv import load_dotenv
 from src.pr_management import PRManager, PRConfig
 from src.client import AnthropicClient
 from src.tools.implementations import ToolImplementations
@@ -14,6 +14,8 @@ from src.phase_management import PhaseManager
 from src.tools.git import GitTools
 from tests.utils.mock_tools import MockSecurityContext
 
+# Load environment variables from .env file
+load_dotenv()
 
 # Test repository configuration
 TEST_REPO_OWNER = os.getenv("TEST_REPO_OWNER", "builder247-test")

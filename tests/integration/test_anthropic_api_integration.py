@@ -4,10 +4,13 @@ import pytest
 import os
 from pathlib import Path
 import tempfile
-
+from dotenv import load_dotenv
 from src.client import AnthropicClient
 from src.tools.types import ToolResponseStatus
 from tests.utils.mock_tools import MockSecurityContext
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @pytest.mark.skipif(
