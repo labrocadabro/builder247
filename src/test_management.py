@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
+import time
 
 from .tools import ToolImplementations
 from .tools.types import ToolResponseStatus
@@ -73,20 +74,39 @@ class TestManager:
         Returns:
             True if tests pass, False otherwise
         """
-        try:
-            result = self.tools.run_command("python -m pytest --verbose")
-            if result.status != ToolResponseStatus.SUCCESS:
-                if self.parse_test_results:
-                    # Parse test output using provided callback
-                    test_results = self.parse_test_results(result.data)
-                    self._record_test_results(
-                        test_results, self._recent_changes, commit_id, commit_message
+        for attempt in range(self.retry_config.max_attempts):
+            try:
+                result = self.tools.run_command("python -m pytest --verbose")
+                if result.status == ToolResponseStatus.SUCCESS:
+                    return True
+
+                # Only record failures on the last attempt
+                if attempt == self.retry_config.max_attempts - 1:
+                    if self.parse_test_results:
+                        # Parse test output using provided callback
+                        test_results = self.parse_test_results(result.data)
+                        self._record_test_results(
+                            test_results,
+                            self._recent_changes,
+                            commit_id,
+                            commit_message,
+                        )
+                    self.logger.error("Max retries exceeded. Tests continue to fail.")
+
+                # Log retry attempt
+                if attempt < self.retry_config.max_attempts - 1:
+                    self.logger.log_error(
+                        "run_tests",
+                        f"Test run failed (attempt {attempt + 1}/{self.retry_config.max_attempts}). Retrying...",
                     )
-                return False
-            return True
-        except Exception as e:
-            self.logger.log_error("run_tests", str(e))
-            return False
+                    time.sleep(self.retry_config.delay_seconds)
+
+            except Exception as e:
+                self.logger.log_error("run_tests", str(e))
+                if attempt < self.retry_config.max_attempts - 1:
+                    time.sleep(self.retry_config.delay_seconds)
+
+        return False
 
     def all_tests_pass(self) -> bool:
         """Check if all tests are passing."""
@@ -146,23 +166,24 @@ class TestManager:
             "metadata": result.metadata,
         }
 
-    def get_test_history(self, test_file: str, limit: int = 5) -> List[TestResult]:
-        """Get test history for a file.
+    def get_test_history(
+        self, test_file: str, limit: Optional[int] = None
+    ) -> List[TestResult]:
+        """Get test history for a specific file.
 
         Args:
-            test_file: Path to test file
-            limit: Maximum number of results to return
+            test_file: Test file path
+            limit: Optional limit on number of results to return
 
         Returns:
-            List of test results, most recent first
+            List of test results for the file, most recent first
         """
-        results = []
-        for result in reversed(self._test_history):
-            if result.test_file == test_file:
-                results.append(result)
-                if len(results) >= limit:
-                    break
-        return results
+        history = [
+            result for result in self._test_history if result.test_file == test_file
+        ]
+        if limit is not None:
+            history = history[:limit]
+        return history
 
     def _find_criterion_for_test(self, test_file: str) -> Optional[str]:
         """Find which criterion a test file belongs to."""
@@ -206,52 +227,54 @@ class TestManager:
     def _record_test_results(
         self,
         test_results: List[Dict],
-        recent_changes: List[str],
+        modified_files: List[str],
         commit_id: Optional[str] = None,
         commit_message: Optional[str] = None,
     ) -> None:
-        """Record test results.
+        """Record test results in history.
 
         Args:
-            test_results: List of parsed test results
-            recent_changes: List of recently modified files
-            commit_id: Optional commit ID being tested
+            test_results: List of test result dictionaries
+            modified_files: List of modified files
+            commit_id: Optional commit ID
             commit_message: Optional commit message
         """
-        for result_data in test_results:
-            # Create TestResult object
-            result = TestResult(
-                test_file=result_data["test_file"],
-                test_name=result_data["test_name"],
-                status=result_data["status"],
-                duration=result_data.get("duration", 0.0),
-                error_type=result_data.get("error_type"),
-                error_message=result_data.get("error_message"),
-                stack_trace=result_data.get("stack_trace"),
-                timestamp=datetime.now(),
-                modified_files=recent_changes,
+        for result in test_results:
+            # Only record failures
+            if result["status"] != "failed":
+                continue
+
+            test_result = TestResult(
+                test_file=result["test_file"],
+                test_name=result["test_name"],
+                status=result["status"],
+                duration=result.get("duration", 0.0),
+                error_type=result.get("error_type"),
+                error_message=result.get("error_message"),
+                stack_trace=result.get("stack_trace"),
+                modified_files=modified_files.copy(),
                 commit_id=commit_id,
                 commit_message=commit_message,
                 metadata={
-                    "codebase_state": self._get_codebase_context(),
+                    "codebase_state": {
+                        "workspace_dir": str(self.workspace_dir),
+                        "modified_files": modified_files.copy(),
+                        "test_files": self.get_test_files(),
+                    }
                 },
             )
 
-            # Record in history
-            self._test_history.append(result)
+            # Check if this exact failure is already recorded
+            duplicate = False
+            for existing in self._test_history:
+                if (
+                    existing.test_file == test_result.test_file
+                    and existing.test_name == test_result.test_name
+                    and existing.error_message == test_result.error_message
+                ):
+                    duplicate = True
+                    break
 
-            # Update criteria manager if this is a criterion test
-            criterion = self._find_criterion_for_test(result.test_file)
-            if criterion:
-                if result.status == "failed":
-                    self.criteria_manager.update_criterion_status(
-                        criterion,
-                        CriteriaStatus.FAILED,
-                        f"Test failure in {result.test_name}: {result.error_message}",
-                    )
-                elif result.status in ["passed", "xpassed"]:
-                    self.criteria_manager.update_criterion_status(
-                        criterion,
-                        CriteriaStatus.VERIFIED,
-                        "Tests passed successfully",
-                    )
+            # Only add if not a duplicate
+            if not duplicate:
+                self._test_history.insert(0, test_result)
