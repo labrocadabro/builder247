@@ -1,192 +1,203 @@
-"""Integration tests for pull request management functionality."""
+"""Integration tests for PR management."""
 
 import pytest
+import os
 from pathlib import Path
-from unittest.mock import Mock
+import tempfile
+from datetime import datetime
 
-from src.pr_management import PRConfig, PRManager
-from src.tools.types import ToolResponse, ToolResponseStatus
+from src.pr_management import PRManager, PRConfig
+from src.client import AnthropicClient
+from src.tools.implementations import ToolImplementations
+from src.utils.monitoring import ToolLogger
 from src.phase_management import PhaseManager
+from src.tools.git import GitTools
+from tests.utils.mock_tools import MockSecurityContext
 
 
-@pytest.fixture
-def pr_config(tmp_path):
-    """Create a test PR configuration with real paths."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    return PRConfig(
-        workspace_dir=workspace,
-        upstream_url="https://github.com/org/repo",
-        fork_url="https://github.com/user/repo",
-        template_path=str(workspace / "pr_template.md"),
-    )
+@pytest.mark.skipif(
+    "GITHUB_TOKEN" not in os.environ or "ANTHROPIC_API_KEY" not in os.environ,
+    reason="GitHub token and Anthropic API key required for PR integration tests",
+)
+class TestPRIntegration:
+    """Integration tests for PR management."""
 
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Set up test environment."""
+        # Create temp directory for workspace
+        self.temp_dir = Path(tempfile.mkdtemp())
 
-@pytest.fixture
-def mock_client():
-    """Create a mock Anthropic client."""
-    return Mock()
+        # Initialize security context
+        self.security_context = MockSecurityContext(temp_dir=self.temp_dir)
 
+        # Initialize components
+        self.tools = ToolImplementations(
+            workspace_dir=self.temp_dir, security_context=self.security_context
+        )
+        self.logger = ToolLogger()
 
-@pytest.fixture
-def mock_tools():
-    """Create mock tools implementation."""
-    return Mock()
+        # Initialize git tools
+        self.git_tools = GitTools(
+            workspace_dir=self.temp_dir, security_context=self.security_context
+        )
 
+        # Initialize phase manager
+        self.phase_manager = PhaseManager(
+            tools=self.tools, logger=self.logger, max_retries=2
+        )
 
-@pytest.fixture
-def mock_logger():
-    """Create mock logger."""
-    return Mock()
+        # Initialize client
+        self.client = AnthropicClient(
+            model="claude-3-opus-20240229", history_dir=self.temp_dir / "history"
+        )
 
+        # Initialize PR config
+        self.pr_config = PRConfig(
+            workspace_dir=self.temp_dir,
+            upstream_url="https://github.com/test/repo.git",
+            fork_url="https://github.com/test-fork/repo.git",
+        )
 
-@pytest.fixture
-def mock_phase_manager():
-    """Create mock phase manager."""
-    return Mock(spec=PhaseManager)
+        # Initialize PR manager
+        self.pr_manager = PRManager(
+            config=self.pr_config,
+            client=self.client,
+            tools=self.tools,
+            logger=self.logger,
+            phase_manager=self.phase_manager,
+        )
 
+        yield
 
-@pytest.fixture
-def pr_manager(pr_config, mock_client, mock_tools, mock_logger, mock_phase_manager):
-    """Create PRManager instance with mocked dependencies."""
-    return PRManager(
-        config=pr_config,
-        client=mock_client,
-        tools=mock_tools,
-        logger=mock_logger,
-        phase_manager=mock_phase_manager,
-    )
+        # Cleanup
+        self.security_context.cleanup()
 
+    def test_pr_creation_flow(self):
+        """Test complete PR creation flow."""
+        # Set up test repository
+        self.git_tools.init_repo()
 
-def test_end_to_end_pr_creation(pr_manager, tmp_path):
-    """Test end-to-end PR creation flow with real file operations."""
-    # Set up PR template
-    template_path = tmp_path / "workspace" / "pr_template.md"
-    template_path.write_text(
-        """
-    ## Changes Made
-    <!-- List the key changes made in this PR -->
+        # Create test changes
+        test_file = self.temp_dir / "test.py"
+        test_file.write_text("print('test')")
 
-    ## Implementation Details
-    <!-- Provide a clear explanation of how the changes work -->
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Initial commit")
 
-    ## Requirements Met
-    <!-- List how each requirement is satisfied -->
+        # Create branch
+        branch_name = f"feature-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self.git_tools.create_branch(branch_name)
+        self.git_tools.checkout_branch(branch_name)
 
-    ## Testing
-    <!-- Describe how the changes were tested -->
+        # Make changes
+        test_file.write_text("print('updated test')")
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Update test file")
 
-    ## Code Quality
-    <!-- Confirm code quality standards are met -->
+        # Create PR
+        success = self.pr_manager.finalize_changes(
+            "Update test implementation", ["Should update test output"]
+        )
+        assert success
 
-    ## Security Considerations
-    <!-- Note any security implications -->
-    """
-    )
+        # Verify PR creation
+        prs = self.git_tools.list_pull_requests()
+        assert len(prs) > 0
+        assert any(pr["title"] == "Update test implementation" for pr in prs)
 
-    # Mock successful sync with upstream
-    pr_manager.tools.execute_tool.side_effect = [
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS, data={"has_conflicts": False}
-        ),  # sync
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS,
-            data={"url": "https://github.com/org/repo/pull/1"},
-        ),  # create PR
-    ]
+    def test_pr_review_feedback(self):
+        """Test handling PR review feedback."""
+        # Set up test repository
+        self.git_tools.init_repo()
 
-    # Mock successful test run
-    pr_manager._all_tests_pass = Mock(return_value=True)
-    pr_manager._get_recent_changes = Mock(
-        return_value=["src/feature.py", "tests/test_feature.py"]
-    )
+        # Create initial PR
+        test_file = self.temp_dir / "test.py"
+        test_file.write_text("print('test')")
 
-    # Attempt to create PR
-    result = pr_manager.finalize_changes(
-        todo_item="Implement new feature",
-        acceptance_criteria=["Feature works as expected", "Has tests"],
-    )
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Initial implementation")
 
-    assert result is True
-    assert pr_manager.tools.execute_tool.call_count == 2
+        success = self.pr_manager.finalize_changes(
+            "Add test implementation", ["Should print test"]
+        )
+        assert success
 
+        # Simulate review feedback
+        review_comment = "Please add error handling"
 
-def test_pr_creation_with_merge_conflicts(pr_manager):
-    """Test PR creation flow when merge conflicts occur."""
-    # Mock sync with conflicts
-    pr_manager.tools.execute_tool.side_effect = [
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS, data={"has_conflicts": True}
-        ),  # sync
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS, data={"has_conflicts": True}
-        ),  # check conflicts
-        ToolResponse(  # get conflict info
-            status=ToolResponseStatus.SUCCESS,
-            data={
-                "conflicts": {
-                    "src/feature.py": {
-                        "content": {
-                            "ancestor": "base content",
-                            "ours": "our changes",
-                            "theirs": "their changes",
-                        }
-                    }
-                }
-            },
-        ),
-        ToolResponse(status=ToolResponseStatus.SUCCESS, data={}),  # resolve conflict
-        ToolResponse(status=ToolResponseStatus.SUCCESS, data={}),  # create merge commit
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS,
-            data={"url": "https://github.com/org/repo/pull/1"},
-        ),  # create PR
-    ]
+        # Update implementation based on feedback
+        test_file.write_text(
+            """
+try:
+    print('test')
+except Exception as e:
+    print(f'Error: {e}')
+"""
+        )
 
-    # Mock successful test run after conflict resolution
-    pr_manager._all_tests_pass = Mock(return_value=True)
-    pr_manager.client.send_message.return_value = ("resolved content", [])
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Add error handling")
 
-    result = pr_manager.finalize_changes(
-        todo_item="Implement new feature",
-        acceptance_criteria=["Feature works as expected"],
-    )
+        # Update PR
+        success = self.pr_manager.update_pr_with_changes(
+            "Updated with error handling", review_comment
+        )
+        assert success
 
-    assert result is True
-    assert pr_manager.tools.execute_tool.call_count == 6
+    def test_pr_merge_conflicts(self):
+        """Test handling PR merge conflicts."""
+        # Set up test repository
+        self.git_tools.init_repo()
 
+        # Create main branch changes
+        test_file = self.temp_dir / "test.py"
+        test_file.write_text("print('main branch')")
 
-def test_pr_creation_with_test_failures(pr_manager, mock_phase_manager):
-    """Test PR creation flow when tests fail and need fixes."""
-    # Mock sync success but test failures
-    pr_manager.tools.execute_tool.side_effect = [
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS, data={"has_conflicts": False}
-        ),  # sync
-        ToolResponse(
-            status=ToolResponseStatus.SUCCESS,
-            data={"url": "https://github.com/org/repo/pull/1"},
-        ),  # create PR
-    ]
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Main branch commit")
 
-    # Mock test failures then success
-    test_results = [False, True]
-    pr_manager._all_tests_pass = Mock(side_effect=test_results)
-    pr_manager._get_test_results = Mock(
-        return_value={"test_feature": "AssertionError: expected True"}
-    )
+        # Create feature branch
+        self.git_tools.create_branch("feature")
+        self.git_tools.checkout_branch("feature")
 
-    # Mock successful fixes phase
-    mock_phase_manager.run_phase_with_recovery.return_value = {
-        "success": True,
-        "fixes_applied": ["Fixed test failure"],
-    }
+        # Make conflicting changes
+        test_file.write_text("print('feature branch')")
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Feature branch commit")
 
-    result = pr_manager.finalize_changes(
-        todo_item="Implement new feature",
-        acceptance_criteria=["Feature works as expected"],
-    )
+        # Try to create PR
+        success = self.pr_manager.finalize_changes(
+            "Feature implementation", ["Should implement feature"]
+        )
+        assert not success  # Should fail due to conflicts
 
-    assert result is True
-    assert pr_manager._all_tests_pass.call_count == 2
-    assert mock_phase_manager.run_phase_with_recovery.call_count == 1
+        # Verify conflict detection
+        status = self.git_tools.get_status()
+        assert "conflict" in status.data.lower()
+
+    def test_pr_validation(self):
+        """Test PR validation checks."""
+        # Set up test repository
+        self.git_tools.init_repo()
+
+        # Test invalid PR title
+        with pytest.raises(ValueError, match="PR title cannot be empty"):
+            self.pr_manager.finalize_changes("", ["Test criterion"])
+
+        # Test invalid criteria
+        with pytest.raises(ValueError, match="Acceptance criteria cannot be empty"):
+            self.pr_manager.finalize_changes("Test PR", [])
+
+        # Test invalid branch name
+        self.git_tools.create_branch("invalid/branch")
+        self.git_tools.checkout_branch("invalid/branch")
+
+        test_file = self.temp_dir / "test.py"
+        test_file.write_text("print('test')")
+
+        self.git_tools.add_file(test_file)
+        self.git_tools.commit("Test commit")
+
+        success = self.pr_manager.finalize_changes("Test PR", ["Test criterion"])
+        assert not success  # Should fail due to invalid branch name
