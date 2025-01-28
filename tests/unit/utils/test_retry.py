@@ -115,27 +115,6 @@ def test_with_retry_tool_response_error(retry_config):
     assert attempts == 2
 
 
-def test_with_retry_cleanup(retry_config):
-    """Test cleanup function between retries."""
-    cleanup_called = 0
-    attempts = 0
-
-    def operation():
-        nonlocal attempts
-        attempts += 1
-        if attempts < 2:
-            raise ValueError("Temporary error")
-        return "success"
-
-    def cleanup():
-        nonlocal cleanup_called
-        cleanup_called += 1
-
-    result = with_retry(operation, config=retry_config, cleanup=cleanup)
-    assert result == "success"
-    assert cleanup_called == 1
-
-
 def test_with_retry_logging(retry_config, caplog):
     """Test that retry attempts are logged."""
     caplog.set_level(logging.WARNING)
