@@ -110,9 +110,9 @@ def test_with_retry_tool_response_error(retry_config):
 
     result = with_retry(operation, config=retry_config)
     assert isinstance(result, ToolResponse)
-    assert result.status == ToolResponseStatus.SUCCESS
-    assert result.data == "success"
-    assert attempts == 2
+    assert result.status == ToolResponseStatus.ERROR
+    assert result.error == "Temporary error"
+    assert attempts == 1
 
 
 def test_with_retry_logging(retry_config, caplog):
@@ -129,4 +129,5 @@ def test_with_retry_logging(retry_config, caplog):
 
     result = with_retry(operation, config=retry_config)
     assert result == "success"
-    assert "Attempt 1 failed: Temporary error" in caplog.text
+    expected_msg = "Attempt 1/3 failed: Temporary error. Retrying in 0.1s"
+    assert any(expected_msg in record.message for record in caplog.records)

@@ -68,6 +68,21 @@ class ToolExecutor:
             Tool execution response
         """
         try:
+            # Validate required parameters
+            if not tool_call.get("name"):
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error="Missing required parameter: name",
+                    data=None,
+                )
+
+            if "parameters" not in tool_call:
+                return ToolResponse(
+                    status=ToolResponseStatus.ERROR,
+                    error="Missing required parameters",
+                    data=None,
+                )
+
             result = self.tools.execute_tool(tool_call)
 
             # Track tool execution

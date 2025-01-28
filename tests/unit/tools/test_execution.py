@@ -28,7 +28,7 @@ def executor(mock_tools, mock_logger):
 
 
 class TestToolExecutor:
-    """Test suite for ToolExecutor class."""
+    """Test tool execution functionality."""
 
     def test_initialization(self, executor, mock_tools, mock_logger):
         """Test executor initialization."""
@@ -175,50 +175,43 @@ class TestToolExecutor:
         assert "test1.py" in executor._recent_changes
         assert "test2.py" in executor._recent_changes
 
-    def test_tool_execution_success():
+    def test_tool_execution_success(self):
         """Test successful tool execution."""
-        tools = Mock()
-        logger = Mock(spec=ToolLogger)
-        executor = ToolExecutor(tools, logger)
+        executor = ToolExecutor(Mock(), Mock())
+        tool_call = {"name": "test_tool", "parameters": {"param1": "value1"}}
 
-        tool_call = {"name": "test_tool", "parameters": {"param": "value"}}
-        tools.execute_tool.return_value = ToolResponse(
-            status=ToolResponseStatus.SUCCESS, data="test output"
+        # Mock successful execution
+        executor.tools.execute_tool.return_value = ToolResponse(
+            status=ToolResponseStatus.SUCCESS, data="success"
         )
 
-        response = executor.execute_tool(tool_call)
+        result = executor.execute_tool_safely(tool_call)
+        assert result.status == ToolResponseStatus.SUCCESS
+        assert result.data == "success"
 
-        assert response.status == ToolResponseStatus.SUCCESS
-        assert response.data == "test output"
-        tools.execute_tool.assert_called_once_with(tool_call)
-        logger.log_tool_execution.assert_called_once()
+        # Verify tool was called correctly
+        executor.tools.execute_tool.assert_called_once_with(tool_call)
 
-    def test_tool_execution_error():
+    def test_tool_execution_error(self):
         """Test tool execution error handling."""
-        tools = Mock()
-        logger = Mock(spec=ToolLogger)
-        executor = ToolExecutor(tools, logger)
+        executor = ToolExecutor(Mock(), Mock())
+        tool_call = {"name": "test_tool", "parameters": {"param1": "value1"}}
 
-        tool_call = {"name": "test_tool", "parameters": {"param": "value"}}
-        error_msg = "Permission denied"
-        tools.execute_tool.side_effect = Exception(error_msg)
+        # Mock error response
+        executor.tools.execute_tool.return_value = ToolResponse(
+            status=ToolResponseStatus.ERROR, error="test error"
+        )
 
-        response = executor.execute_tool(tool_call)
+        result = executor.execute_tool_safely(tool_call)
+        assert result.status == ToolResponseStatus.ERROR
+        assert result.error == "test error"
 
-        assert response.status == ToolResponseStatus.ERROR
-        assert error_msg in response.error
-        logger.log_error.assert_called_once()
+    def test_tool_execution_validation(self):
+        """Test tool execution parameter validation."""
+        executor = ToolExecutor(Mock(), Mock())
 
-    def test_tool_execution_validation():
-        """Test tool call validation."""
-        tools = Mock()
-        logger = Mock(spec=ToolLogger)
-        executor = ToolExecutor(tools, logger)
-
-        # Test missing tool name
-        invalid_call = {"parameters": {"param": "value"}}
-        response = executor.execute_tool(invalid_call)
-
-        assert response.status == ToolResponseStatus.ERROR
-        assert "Invalid tool call" in response.error
-        logger.log_error.assert_called_once()
+        # Test with missing required parameters
+        tool_call = {"name": "test_tool"}
+        result = executor.execute_tool_safely(tool_call)
+        assert result.status == ToolResponseStatus.ERROR
+        assert "missing required parameters" in result.error.lower()

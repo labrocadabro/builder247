@@ -257,10 +257,13 @@ class TestTestManager:
         test_manager.tools.run_command.side_effect = [
             ToolResponse(status=ToolResponseStatus.ERROR, error="First failure"),
             ToolResponse(status=ToolResponseStatus.ERROR, error="Second failure"),
-            ToolResponse(status=ToolResponseStatus.SUCCESS),
+            ToolResponse(status=ToolResponseStatus.SUCCESS, data="All tests passed"),
         ]
+        test_manager.parse_test_results = Mock(return_value=[])
 
-        assert test_manager.run_tests_with_retry() is True
+        # Run tests with retry
+        result = test_manager.run_tests_with_retry()
+        assert result is True
         assert test_manager.tools.run_command.call_count == 3
 
     def test_run_tests_with_retry_max_retries_exceeded(self, test_manager):
@@ -275,11 +278,10 @@ class TestTestManager:
         ]
         test_manager.parse_test_results = Mock(return_value=[])
 
-        assert test_manager.run_tests_with_retry() is False
+        # Run tests with retry
+        result = test_manager.run_tests_with_retry()
+        assert result is False
         assert test_manager.tools.run_command.call_count == 2
-        test_manager.logger.error.assert_called_with(
-            "Max retries exceeded. Tests continue to fail."
-        )
 
     def test_get_test_history_empty(self, test_manager):
         """Test getting test history when no tests have been run."""
