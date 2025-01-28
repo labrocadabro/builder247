@@ -172,7 +172,7 @@ def test_sync_fork_success(mock_repo, git_tools):
     )
 
     assert response.status == ToolResponseStatus.SUCCESS
-    assert response.data == {"synced": True}
+    assert response.data == {"has_conflicts": False}
     assert "repo_url" in response.metadata
     assert "fork_url" in response.metadata
 

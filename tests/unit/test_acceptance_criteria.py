@@ -135,3 +135,37 @@ def test_verify_test_coverage(criteria_manager):
     # Add test file for second criterion
     criteria_manager.add_test_file("Criterion 2", "tests/test_2.py")
     assert criteria_manager.verify_test_coverage()
+
+
+def test_get_dependencies(criteria_manager):
+    """Test getting criterion dependencies."""
+    # Add criteria with dependencies
+    criteria_manager.add_criterion("Criterion 1")
+    criteria_manager.add_criterion("Criterion 2")
+    criteria_manager.add_criterion("Criterion 3")
+
+    criteria_manager.add_dependency("Criterion 2", "Criterion 1")
+    criteria_manager.add_dependency("Criterion 3", "Criterion 2")
+
+    deps = criteria_manager.get_dependencies("Criterion 3")
+    assert len(deps) == 2
+    assert "Criterion 1" in deps
+    assert "Criterion 2" in deps
+
+
+def test_get_blocking_criteria(criteria_manager):
+    """Test getting blocking criteria."""
+    # Add criteria with dependencies
+    criteria_manager.add_criterion("Criterion 1")
+    criteria_manager.add_criterion("Criterion 2")
+    criteria_manager.add_criterion("Criterion 3")
+
+    criteria_manager.add_dependency("Criterion 2", "Criterion 1")
+    criteria_manager.add_dependency("Criterion 3", "Criterion 2")
+
+    # Only Criterion 1 is verified
+    criteria_manager.update_criterion_status("Criterion 1", CriteriaStatus.VERIFIED)
+
+    blocking = criteria_manager.get_blocking_criteria("Criterion 3")
+    assert len(blocking) == 1
+    assert "Criterion 2" in blocking

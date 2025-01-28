@@ -3,7 +3,6 @@
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -45,8 +44,8 @@ class Database:
         error_message TEXT,
         stack_trace TEXT,
         timestamp DATETIME NOT NULL,
-        fixed_by TEXT,
-        fix_description TEXT,
+        commit_id TEXT,
+        commit_message TEXT,
         metadata TEXT  -- JSON
     );
 

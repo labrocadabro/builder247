@@ -1,4 +1,4 @@
-"""Git automation tools with security checks."""
+"""Git operations and utilities."""
 
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -12,6 +12,7 @@ from git.refs import Head
 from .types import ToolResponse, ToolResponseStatus
 from ..utils.retry import with_retry, RetryConfig
 from .implementations import ToolImplementations
+from ..utils.monitoring import ToolLogger
 
 
 class GitTools:
@@ -52,6 +53,9 @@ class GitTools:
             delay_seconds=1.0,
             retry_on=[requests.RequestException, IOError],
         )
+
+        self.logger = ToolLogger()
+        self.repo = None
 
     def check_fork_exists(self, owner: str, repo_name: str) -> ToolResponse:
         """Check if fork exists using GitHub API.
@@ -279,19 +283,17 @@ class GitTools:
             ToolResponse with has_conflicts boolean and list of conflicting files
         """
         try:
-            repo = Repo(self.git_dir)
+            if not self.repo:
+                self.repo = Repo(self.git_dir)
 
             # Check unmerged paths
-            unmerged = []
-            if repo.index.unmerged_blobs():
-                for path in repo.index.unmerged_blobs():
-                    unmerged.append(path)
-
+            unmerged = [item.a_path for item in self.repo.index.unmerged_blobs()]
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
                 data={"has_conflicts": bool(unmerged), "conflicting_files": unmerged},
             )
         except Exception as e:
+            self.logger.log_error("check_for_conflicts", str(e))
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=str(e),
@@ -309,27 +311,31 @@ class GitTools:
             - common ancestor
         """
         try:
-            repo = Repo(self.git_dir)
+            if not self.repo:
+                self.repo = Repo(self.git_dir)
+
             conflicts = {}
+            for item in self.repo.index.unmerged_blobs():
+                file_path = item.a_path
+                # Get all versions of the file
+                versions = {}
+                for stage, blob in item.entries.items():
+                    if stage == 1:  # Common ancestor
+                        versions["ancestor"] = blob.data_stream.read().decode()
+                    elif stage == 2:  # Our changes
+                        versions["ours"] = blob.data_stream.read().decode()
+                    elif stage == 3:  # Their changes
+                        versions["theirs"] = blob.data_stream.read().decode()
 
-            for path, blobs in repo.index.unmerged_blobs().items():
-                # Get all versions of the file (ancestor, ours, theirs)
-                versions = {blob.stage: blob.hexsha for _, blob in blobs}
-
-                conflict_info = {
-                    "path": path,
-                    "content": {
-                        "ancestor": repo.git.show(versions[1]) if 1 in versions else "",
-                        "ours": repo.git.show(versions[2]) if 2 in versions else "",
-                        "theirs": repo.git.show(versions[3]) if 3 in versions else "",
-                    },
+                conflicts[file_path] = {
+                    "content": versions,
                 }
-                conflicts[path] = conflict_info
 
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS, data={"conflicts": conflicts}
             )
         except Exception as e:
+            self.logger.log_error("get_conflict_info", str(e))
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=str(e),
@@ -347,13 +353,15 @@ class GitTools:
             ToolResponse indicating success/failure
         """
         try:
+            if not self.repo:
+                self.repo = Repo(self.git_dir)
+
             # Write resolution to file
             full_path = self.git_dir / file_path
             full_path.write_text(resolution)
 
             # Stage the resolved file
-            repo = Repo(self.git_dir)
-            repo.index.add([file_path])
+            self.repo.index.add([file_path])
 
             return ToolResponse(
                 status=ToolResponseStatus.SUCCESS,
@@ -361,11 +369,37 @@ class GitTools:
                 metadata={"file": file_path},
             )
         except Exception as e:
+            self.logger.log_error("resolve_conflict", str(e))
             return ToolResponse(
                 status=ToolResponseStatus.ERROR,
                 error=str(e),
                 metadata={"error_type": e.__class__.__name__, "file": file_path},
             )
+
+    def create_merge_commit(self, message: str) -> Optional[str]:
+        """Create a merge commit after resolving conflicts.
+
+        Args:
+            message: Commit message
+
+        Returns:
+            Commit ID if successful, None otherwise
+        """
+        try:
+            if not self.repo:
+                self.repo = Repo(self.git_dir)
+
+            # Check if there are any staged changes
+            if not self.repo.index.diff("HEAD"):
+                return None
+
+            # Create commit
+            commit = self.repo.index.commit(message)
+            return commit.hexsha
+
+        except Exception as e:
+            self.logger.log_error("create_merge_commit", str(e))
+            return None
 
     def sync_fork(self, repo_url: str, fork_url: str) -> ToolResponse:
         """Sync fork with upstream repository.
@@ -461,7 +495,7 @@ def register_git_tools(tool_impl: ToolImplementations) -> None:
     Args:
         tool_impl: ToolImplementations instance
     """
-    git_tools = GitTools(tool_impl.fs_tools.workspace_dir, tool_impl.security_context)
+    git_tools = GitTools(tool_impl.workspace_dir, tool_impl.security_context)
 
     # Register individual tools
     tool_impl.register_tool(
@@ -590,6 +624,20 @@ def register_git_tools(tool_impl: ToolImplementations) -> None:
                 "resolution": {
                     "type": "string",
                     "description": "Content to use for resolution",
+                },
+            },
+        },
+    )
+
+    tool_impl.register_tool(
+        "git_create_merge_commit",
+        git_tools.create_merge_commit,
+        schema={
+            "description": "Create a merge commit after resolving conflicts",
+            "parameters": {
+                "message": {
+                    "type": "string",
+                    "description": "Commit message",
                 },
             },
         },

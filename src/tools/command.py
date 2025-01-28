@@ -2,7 +2,7 @@
 Command execution with security checks.
 """
 
-from typing import List, Dict, Union, Optional
+from typing import List, Dict, Union, Optional, TYPE_CHECKING, Callable
 import subprocess
 import os
 import re
@@ -11,7 +11,9 @@ from pathlib import Path
 from .types import ToolResponse, ToolResponseStatus
 from ..security.core_context import SecurityContext
 from ..utils.string_sanitizer import sanitize_text
-from .implementations import ToolImplementations
+
+if TYPE_CHECKING:
+    from .implementations import ToolImplementations
 
 
 class CommandError(Exception):
@@ -505,17 +507,34 @@ class CommandExecutor:
         return clean_env
 
 
-def register_command_tools(tool_impl: ToolImplementations) -> None:
+def create_command_tools(security_context: SecurityContext) -> Dict[str, Callable]:
+    """Create command execution tools.
+
+    Args:
+        security_context: Security context for command execution
+
+    Returns:
+        Dict of tool name to tool function
+    """
+    executor = CommandExecutor(security_context)
+
+    return {
+        "run_command": executor.run_command,
+        "run_piped_commands": executor.run_piped_commands,
+    }
+
+
+def register_command_tools(tool_impl: "ToolImplementations") -> None:
     """Register command execution tools with ToolImplementations.
 
     Args:
-        tool_impl: ToolImplementations instance
+        tool_impl: Tool registry to register with
     """
-    cmd_executor = tool_impl.cmd_executor
+    tools = create_command_tools(tool_impl.security_context)
 
     tool_impl.register_tool(
         "run_command",
-        cmd_executor.run_command,
+        tools["run_command"],
         schema={
             "description": "Execute a shell command",
             "parameters": {
@@ -531,7 +550,7 @@ def register_command_tools(tool_impl: ToolImplementations) -> None:
 
     tool_impl.register_tool(
         "run_piped_commands",
-        cmd_executor.run_piped_commands,
+        tools["run_piped_commands"],
         schema={
             "description": "Execute a pipeline of shell commands",
             "parameters": {

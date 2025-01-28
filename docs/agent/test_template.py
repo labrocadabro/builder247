@@ -9,6 +9,7 @@ This template demonstrates:
 """
 
 import pytest
+from tests.utils.fixtures import workspace_dir  # Import common fixture
 
 
 # Define custom markers for test categories
@@ -84,8 +85,8 @@ class TestFeatureGroup:
         3. Clean up resources on failure
         """
         with pytest.raises(ValueError) as exc:
-            # Test implementation
-            pass
+            # Test implementation that raises ValueError
+            raise ValueError("Expected error message")
         assert str(exc.value) == "Expected error message"
 
 

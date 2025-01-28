@@ -2,49 +2,50 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import Enum, auto
 from typing import Dict, List, Optional, Set
 from pathlib import Path
 
 
-class CriteriaStatus(str, Enum):
+class CriteriaStatus(Enum):
     """Status of an acceptance criterion."""
 
-    NOT_STARTED = "not_started"
-    IN_PROGRESS = "in_progress"
-    IMPLEMENTED = "implemented"
-    VERIFIED = "verified"
-    FAILED = "failed"
+    NOT_STARTED = auto()  # Initial state
+    IN_PROGRESS = auto()  # Work has started
+    IMPLEMENTED = auto()  # Implementation complete
+    TESTING = auto()  # Currently being tested
+    FAILED = auto()  # Test failed
+    VERIFIED = auto()  # Test passed
+    BLOCKED = auto()  # Cannot be tested yet
 
 
 @dataclass
 class TestFailure:
-    """Information about a test failure."""
+    """Record of a test failure."""
 
-    timestamp: datetime
     test_file: str
     test_name: str
     error_message: str
     stack_trace: str
-    related_changes: List[str] = field(
-        default_factory=list
-    )  # Files changed before failure
-    fixed_by: Optional[str] = None  # File/change that fixed the failure
-    fix_description: Optional[str] = None
-    failure_pattern: Optional[str] = None  # Categorized pattern if identified
+    timestamp: datetime
+    related_changes: List[str]  # Files changed in the commit being tested
+    failure_pattern: Optional[str] = None  # Identified pattern of failure
 
 
 @dataclass
 class CriterionInfo:
-    """Information about a single acceptance criterion."""
+    """Information about an acceptance criterion."""
 
-    description: str
-    status: CriteriaStatus
-    test_files: Set[str]  # Files containing tests for this criterion
-    implementation_files: Set[str]  # Files modified to implement this criterion
-    verification_output: Optional[str] = None  # Test output or verification details
+    criterion: str
+    description: str  # Same as criterion for backward compatibility
+    status: CriteriaStatus = CriteriaStatus.NOT_STARTED
+    status_reason: Optional[str] = None
+    test_files: Set[str] = field(default_factory=set)
+    implementation_files: Set[str] = field(default_factory=set)
     test_failures: List[TestFailure] = field(default_factory=list)
     current_failure: Optional[TestFailure] = None
+    dependencies: Set[str] = field(default_factory=set)
+    verification_output: Optional[str] = None  # For backward compatibility
 
 
 class AcceptanceCriteriaManager:
@@ -62,42 +63,50 @@ class AcceptanceCriteriaManager:
             {}
         )  # Pattern -> Similar failures
 
-    def add_criterion(self, description: str) -> None:
+    def add_criterion(
+        self, criterion: str, dependencies: Optional[List[str]] = None
+    ) -> None:
         """Add a new acceptance criterion.
 
         Args:
-            description: Description of the criterion
-        """
-        if description in self.criteria:
-            raise ValueError(f"Criterion already exists: {description}")
+            criterion: The criterion to add
+            dependencies: Optional list of criteria that must be met first
 
-        self.criteria[description] = CriterionInfo(
-            description=description,
-            status=CriteriaStatus.NOT_STARTED,
-            test_files=set(),
-            implementation_files=set(),
-        )
+        Raises:
+            ValueError: If criterion already exists
+        """
+        if criterion in self.criteria:
+            raise ValueError(f"Criterion already exists: {criterion}")
+
+        info = CriterionInfo(criterion=criterion, description=criterion)
+        if dependencies:
+            info.dependencies.update(dependencies)
+        self.criteria[criterion] = info
 
     def update_criterion_status(
-        self,
-        description: str,
-        status: CriteriaStatus,
-        verification_output: Optional[str] = None,
+        self, criterion: str, status: CriteriaStatus, reason: Optional[str] = None
     ) -> None:
         """Update the status of a criterion.
 
         Args:
-            description: Criterion description
+            criterion: The criterion to update
             status: New status
-            verification_output: Optional test output or verification details
-        """
-        if description not in self.criteria:
-            raise ValueError(f"Unknown criterion: {description}")
+            reason: Optional reason for the status change
 
-        criterion = self.criteria[description]
-        criterion.status = status
-        if verification_output:
-            criterion.verification_output = verification_output
+        Raises:
+            ValueError: If criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+
+        info = self.criteria[criterion]
+        info.status = status
+        info.status_reason = reason
+        info.verification_output = reason  # For backward compatibility
+
+        # Clear current failure if criterion is now verified
+        if status == CriteriaStatus.VERIFIED:
+            info.current_failure = None
 
     def add_test_file(self, description: str, test_file: str) -> None:
         """Associate a test file with a criterion.
@@ -143,7 +152,8 @@ class AcceptanceCriteriaManager:
         """
         return {
             desc: {
-                "status": info.status.value,
+                "status": info.status.name.lower(),
+                "reason": info.status_reason,
                 "test_files": sorted(info.test_files),
                 "implementation_files": sorted(info.implementation_files),
                 "verification_output": info.verification_output,
@@ -166,71 +176,47 @@ class AcceptanceCriteriaManager:
         test_name: str,
         error_message: str,
         stack_trace: str,
-        related_changes: Optional[List[str]] = None,
+        related_changes: List[str],
+        failure_pattern: Optional[str] = None,
     ) -> None:
         """Record a test failure for a criterion.
 
         Args:
-            criterion: The criterion that failed
-            test_file: Path to the test file
+            criterion: The criterion whose test failed
+            test_file: File containing the failing test
             test_name: Name of the failing test
-            error_message: The error message from the test
-            stack_trace: The full stack trace
-            related_changes: List of files changed before the failure
+            error_message: Error message from the test
+            stack_trace: Stack trace of the failure
+            related_changes: Files changed in the commit being tested
+            failure_pattern: Optional identified pattern of failure
+
+        Raises:
+            ValueError: If criterion doesn't exist
         """
         if criterion not in self.criteria:
             raise ValueError(f"Unknown criterion: {criterion}")
 
         failure = TestFailure(
-            timestamp=datetime.now(),
             test_file=test_file,
             test_name=test_name,
             error_message=error_message,
             stack_trace=stack_trace,
-            related_changes=related_changes or [],
+            timestamp=datetime.now(),
+            related_changes=related_changes,
+            failure_pattern=failure_pattern,
         )
-
-        # Add to criterion's failure history
-        self.criteria[criterion].test_failures.append(failure)
-        self.criteria[criterion].current_failure = failure
-
-        # Update criterion status
-        self.update_criterion_status(
-            criterion,
-            CriteriaStatus.FAILED,
-            f"Test failure in {test_name}: {error_message}",
-        )
-
-        # Try to identify failure pattern
-        self._analyze_failure_pattern(criterion, failure)
-
-    def record_failure_fix(
-        self, criterion: str, fixed_by: str, fix_description: str
-    ) -> None:
-        """Record information about how a failure was fixed.
-
-        Args:
-            criterion: The criterion whose failure was fixed
-            fixed_by: The file/change that fixed the failure
-            fix_description: Description of the fix
-        """
-        if criterion not in self.criteria:
-            raise ValueError(f"Unknown criterion: {criterion}")
 
         info = self.criteria[criterion]
-        if info.current_failure:
-            info.current_failure.fixed_by = fixed_by
-            info.current_failure.fix_description = fix_description
-            info.current_failure = None  # Clear current failure
+        info.test_failures.append(failure)
+        info.current_failure = failure
+        info.status = CriteriaStatus.FAILED
+        info.status_reason = error_message
 
-    def get_failure_history(
-        self, criterion: str, include_fixes: bool = True
-    ) -> List[Dict]:
+    def get_failure_history(self, criterion: str) -> List[Dict]:
         """Get the failure history for a criterion.
 
         Args:
             criterion: The criterion to get history for
-            include_fixes: Whether to include fix information
 
         Returns:
             List of failure records with timestamps and details
@@ -249,13 +235,6 @@ class AcceptanceCriteriaManager:
                 "related_changes": failure.related_changes,
                 "pattern": failure.failure_pattern,
             }
-            if include_fixes and failure.fixed_by:
-                failure_info.update(
-                    {
-                        "fixed_by": failure.fixed_by,
-                        "fix_description": failure.fix_description,
-                    }
-                )
             failures.append(failure_info)
 
         return failures
@@ -354,3 +333,140 @@ class AcceptanceCriteriaManager:
         union = words1.union(words2)
 
         return len(intersection) / len(union)
+
+    def get_criterion_status(self, criterion: str) -> Dict:
+        """Get the current status of a criterion.
+
+        Args:
+            criterion: The criterion to get status for
+
+        Returns:
+            Dict containing status information
+
+        Raises:
+            ValueError: If criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+
+        info = self.criteria[criterion]
+        status_info = {
+            "status": info.status,
+            "reason": info.status_reason,
+            "dependencies": list(info.dependencies),
+            "failure_count": len(info.test_failures),
+        }
+
+        if info.current_failure:
+            status_info["current_failure"] = {
+                "test_file": info.current_failure.test_file,
+                "test_name": info.current_failure.test_name,
+                "error_message": info.current_failure.error_message,
+                "timestamp": info.current_failure.timestamp,
+                "related_changes": info.current_failure.related_changes,
+                "pattern": info.current_failure.failure_pattern,
+            }
+
+        return status_info
+
+    def get_all_criteria(self) -> Dict[str, Dict]:
+        """Get status of all criteria.
+
+        Returns:
+            Dict mapping criterion to its status information
+        """
+        return {
+            criterion: self.get_criterion_status(criterion)
+            for criterion in self.criteria
+        }
+
+    def get_blocking_criteria(self, criterion: str) -> List[str]:
+        """Get criteria blocking a given criterion.
+
+        Args:
+            criterion: The criterion to check
+
+        Returns:
+            List of criteria that must be met first
+
+        Raises:
+            ValueError: If criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+
+        blocking = []
+        for dependency in self.criteria[criterion].dependencies:
+            if dependency not in self.criteria:
+                continue
+            if self.criteria[dependency].status != CriteriaStatus.VERIFIED:
+                blocking.append(dependency)
+
+        return blocking
+
+    def get_dependent_criteria(self, criterion: str) -> List[str]:
+        """Get criteria that depend on a given criterion.
+
+        Args:
+            criterion: The criterion to check
+
+        Returns:
+            List of criteria that depend on this one
+
+        Raises:
+            ValueError: If criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+
+        dependent = []
+        for other_criterion, info in self.criteria.items():
+            if criterion in info.dependencies:
+                dependent.append(other_criterion)
+
+        return dependent
+
+    def add_dependency(self, criterion: str, dependency: str) -> None:
+        """Add a dependency between criteria.
+
+        Args:
+            criterion: The criterion that depends on another
+            dependency: The criterion that must be met first
+
+        Raises:
+            ValueError: If either criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+        if dependency not in self.criteria:
+            raise ValueError(f"Unknown dependency criterion: {dependency}")
+
+        self.criteria[criterion].dependencies.add(dependency)
+
+    def get_dependencies(self, criterion: str) -> List[str]:
+        """Get all dependencies for a criterion, including transitive dependencies.
+
+        Args:
+            criterion: The criterion to get dependencies for
+
+        Returns:
+            List of criteria that this criterion depends on (directly or indirectly)
+
+        Raises:
+            ValueError: If criterion doesn't exist
+        """
+        if criterion not in self.criteria:
+            raise ValueError(f"Unknown criterion: {criterion}")
+
+        all_deps = set()
+        to_process = list(self.criteria[criterion].dependencies)
+
+        while to_process:
+            dep = to_process.pop(0)
+            if dep not in all_deps:
+                all_deps.add(dep)
+                # Add this dependency's dependencies to process
+                if dep in self.criteria:
+                    to_process.extend(self.criteria[dep].dependencies)
+
+        return list(all_deps)

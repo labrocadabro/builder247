@@ -1,0 +1,350 @@
+"""Phase management functionality."""
+
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List, Optional, Callable
+
+from .client import AnthropicClient
+from .tools import ToolImplementations
+from .tools.types import ToolResponse, ToolResponseStatus
+from .tools.execution import ToolExecutor
+from .utils.monitoring import ToolLogger
+from .acceptance_criteria import CriteriaStatus
+
+
+class ImplementationPhase(str, Enum):
+    """Phases of implementation process."""
+
+    ANALYSIS = "analysis"
+    IMPLEMENTATION = "implementation"
+    TESTING = "testing"
+    FIXES = "fixes"
+
+
+@dataclass
+class PhaseState:
+    """State of an implementation phase."""
+
+    phase: ImplementationPhase
+    attempts: int = 0
+    last_error: Optional[str] = None
+    last_feedback: Optional[str] = None
+
+
+class PhaseManager:
+    """Manages implementation phases and their transitions."""
+
+    def __init__(
+        self,
+        client: AnthropicClient,
+        tools: ToolImplementations,
+        logger: ToolLogger,
+        max_retries: int = 3,
+    ):
+        """Initialize phase manager.
+
+        Args:
+            client: Client for LLM interaction
+            tools: Tool implementations
+            logger: Logger instance
+            max_retries: Maximum retry attempts per phase
+        """
+        self.client = client
+        self.tools = tools
+        self.logger = logger
+        self.max_retries = max_retries
+        self.tool_executor = ToolExecutor(tools, logger)
+
+    def run_phase_with_recovery(
+        self,
+        phase_state: PhaseState,
+        context: Dict,
+        validator: Callable[[Dict], Optional[Dict]],
+    ) -> Optional[Dict]:
+        """Run a phase with state tracking and recovery.
+
+        Args:
+            phase_state: Current phase state
+            context: Context for phase execution
+            validator: Function to validate phase results
+
+        Returns:
+            Phase results if successful, None otherwise
+        """
+        while True:
+            try:
+                # Create focused message with error context if any
+                message = self._create_message_with_context(context, phase_state)
+
+                # Get LLM response
+                response_text, tool_calls = self.client.send_message(message)
+
+                # Check for task abandonment
+                if "ABANDON_TASK:" in response_text:
+                    self._handle_task_abandoned(response_text, context["criteria"])
+                    return None
+
+                # Execute tools
+                results = self.tool_executor.execute_tools(tool_calls)
+                if not results:
+                    phase_state.last_error = "Tool execution failed"
+                    if phase_state.attempts >= self.max_retries:
+                        return None
+                    phase_state.attempts += 1
+                    continue
+
+                # Add criteria to results for validation
+                results["criteria"] = context["criteria"]
+
+                # Validate phase completion
+                results = validator(results)
+                if results:
+                    return results
+
+                # Update state and retry
+                phase_state.attempts += 1
+                if phase_state.attempts >= self.max_retries:
+                    self._handle_phase_failed(phase_state, context["criteria"])
+                    return None
+
+            except Exception as e:
+                phase_state.last_error = str(e)
+                phase_state.attempts += 1
+                if phase_state.attempts >= self.max_retries:
+                    self._handle_error(e, context["criteria"])
+                    return None
+
+    def _execute_tools(self, tool_calls: List[Dict]) -> Optional[Dict]:
+        """Execute a series of tool calls and collect results."""
+        results = {
+            "files_modified": [],
+            "test_files_added": [],
+            "fixes_applied": [],
+            "commit_message": None,  # Will be provided by LLM
+        }
+
+        for tool_call in tool_calls:
+            result = self._execute_tool_safely(tool_call)
+            if result.status != ToolResponseStatus.SUCCESS:
+                return None
+
+            # Track results based on tool type
+            if "file" in result.metadata:
+                results["files_modified"].append(result.metadata["file"])
+                if result.metadata["file"].startswith("tests/"):
+                    results["test_files_added"].append(result.metadata["file"])
+
+            # Capture commit message if provided by LLM
+            if "commit_message" in tool_call:
+                results["commit_message"] = tool_call["commit_message"]
+            elif tool_call.get("purpose") == "fix":
+                results["fixes_applied"].append(tool_call.get("explanation", ""))
+
+        return results
+
+    def _execute_tool_safely(self, tool_call: Dict) -> ToolResponse:
+        """Execute a tool call and track changes."""
+        return self.tools.execute_tool(tool_call)
+
+    def _create_message_with_context(
+        self, context: Dict, phase_state: PhaseState
+    ) -> str:
+        """Create focused message for current phase with error context."""
+        message = []
+
+        # Add error context if any
+        if phase_state.last_error:
+            message.extend(
+                [
+                    f"\nLast Error: {phase_state.last_error}",
+                    f"Attempt {phase_state.attempts + 1} of {self.max_retries}",
+                ]
+            )
+
+        # Add guide content for current phase
+        guide_content = self._get_guide_content(phase_state.phase)
+        if guide_content:
+            message.extend(["\nPhase Guidelines:", guide_content])
+
+        # Add existing message content
+        message.extend(
+            [
+                f"\nTodo item: {context['todo']}",
+                "\nAcceptance Criteria:",
+                *[f"- {c}" for c in context["criteria"]],
+            ]
+        )
+
+        # Phase-specific context
+        if phase_state.phase == ImplementationPhase.ANALYSIS:
+            message.extend(
+                [
+                    "\nRelevant Files:",
+                    *context.get("relevant_files", []),
+                    "\nInstructions:",
+                    "1. Review the requirements",
+                    "2. Identify files that need changes",
+                    "3. List specific changes needed for each criterion",
+                ]
+            )
+        elif phase_state.phase == ImplementationPhase.IMPLEMENTATION:
+            planned_changes = context.get("planned_changes", [])
+            message.extend(
+                [
+                    "\nPlanned Changes:",
+                    *[
+                        f"- {change['description']} (for {change['criterion']})"
+                        for change in planned_changes
+                    ],
+                    "\nCurrent Change:",
+                    context.get("current_change", ""),
+                    "\nInstructions:",
+                    "1. Implement the planned changes",
+                    "2. Ensure changes match the requirements",
+                    "3. Add necessary error handling and edge cases",
+                ]
+            )
+        elif phase_state.phase == ImplementationPhase.TESTING:
+            message.extend(
+                [
+                    "\nImplemented Changes:",
+                    *context.get("implemented_changes", []),
+                    "\nCriterion to Test:",
+                    context.get("current_criterion", ""),
+                    "\nInstructions:",
+                    "1. Create tests following the provided test template structure",
+                    "2. Group related test cases in test classes",
+                    "3. Add clear docstrings explaining test purpose and assumptions",
+                    "4. Use appropriate pytest markers for test categorization",
+                    "5. Include edge cases and error conditions",
+                    "6. Ensure tests are clear and maintainable",
+                    "7. Add necessary fixtures for test setup",
+                ]
+            )
+        elif phase_state.phase == ImplementationPhase.FIXES:
+            # Get the failing tests and their history
+            failing_tests = context.get("failing_tests", [])
+            test_histories = {}
+            for test_file in failing_tests:
+                history = self.test_history.get_test_summary(test_file)
+                if history:
+                    test_histories[test_file] = history
+
+            message.append("\nTest Failures:")
+
+            for test_file, history in test_histories.items():
+                # Most recent failure first
+                latest = history[0]
+                message.extend(
+                    [
+                        f"\n{test_file}:",
+                        f"Current Status: {latest['status']}",
+                        f"Error Type: {latest['error_type']}",
+                        f"Modified Files: {', '.join(latest['modified_files'] or [])}",
+                        f"Failed Testing Commit: {latest['commit_id'][:8]} - {latest['commit_message']}",
+                        "\nFull Error Details:",
+                        context.get("test_results", {}).get(
+                            test_file, "No details available"
+                        ),
+                        "\nPrevious Attempts:",
+                    ]
+                )
+
+                # Add previous attempts with commit info
+                for h in history[1:]:
+                    message.append(
+                        f"- {h['timestamp']}: {h['status']} "
+                        f"(Duration: {h['duration']:.2f}s) "
+                        f"Testing commit {h['commit_id'][:8]} - {h['commit_message']}"
+                    )
+
+            message.extend(
+                [
+                    "\nInstructions:",
+                    "1. Analyze the test failures and their history",
+                    "2. Note any patterns in failing tests",
+                    "3. Determine if the test or implementation needs fixing",
+                    "4. Make the necessary changes",
+                ]
+            )
+
+        if phase_state.last_feedback:
+            message.extend(
+                [
+                    "\nFeedback from previous attempt:",
+                    phase_state.last_feedback,
+                ]
+            )
+
+        return "\n".join(message)
+
+    def _get_guide_content(self, phase: ImplementationPhase) -> str:
+        """Get the relevant guide content for the current phase."""
+        # Always include workflow guide
+        guides = ["docs/agent/workflow_guide.md"]
+
+        # Add phase-specific guide
+        phase_guide = {
+            ImplementationPhase.ANALYSIS: "docs/agent/design_guide.md",
+            ImplementationPhase.IMPLEMENTATION: "docs/agent/implementation_guide.md",
+            ImplementationPhase.TESTING: "docs/agent/testing_guide.md",
+            ImplementationPhase.FIXES: "docs/agent/pr_guide.md",
+        }.get(phase)
+
+        if phase_guide:
+            guides.append(phase_guide)
+
+        # Add test template during testing phase
+        if phase == ImplementationPhase.TESTING:
+            guides.append("docs/test_template.py")
+
+        # Read and combine guides
+        content = []
+        for guide in guides:
+            if Path(guide).exists():
+                with open(guide, "r") as f:
+                    content.append(f.read())
+
+        return "\n\n".join(content) if content else ""
+
+    def _handle_task_abandoned(self, response_text: str, criteria: List[str]) -> None:
+        """Handle task abandonment."""
+        error_msg = response_text.split("ABANDON_TASK:")[1].strip()
+        self.logger.log_error("task_abandoned", error_msg)
+        for criterion in criteria:
+            self.criteria_manager.update_criterion_status(
+                criterion, CriteriaStatus.FAILED, error_msg
+            )
+
+    def _handle_phase_failed(
+        self, phase_state: PhaseState, criteria: List[str]
+    ) -> None:
+        """Handle a phase failing after max retries."""
+        error_msg = (
+            f"Phase {phase_state.phase} failed after {phase_state.attempts} attempts"
+        )
+        if phase_state.last_error:
+            error_msg += f": {phase_state.last_error}"
+        if phase_state.last_feedback:
+            error_msg += f"\nLast feedback: {phase_state.last_feedback}"
+
+        self.logger.log_error(
+            "phase_failed",
+            error_msg,
+            {"phase": phase_state.phase, "attempts": phase_state.attempts},
+        )
+
+        for criterion in criteria:
+            self.criteria_manager.update_criterion_status(
+                criterion, CriteriaStatus.FAILED, error_msg
+            )
+
+    def _handle_error(self, error: Exception, criteria: List[str]) -> None:
+        """Handle an error during phase execution."""
+        error_msg = str(error)
+        self.logger.log_error("phase_error", error_msg)
+        for criterion in criteria:
+            self.criteria_manager.update_criterion_status(
+                criterion, CriteriaStatus.FAILED, error_msg
+            )

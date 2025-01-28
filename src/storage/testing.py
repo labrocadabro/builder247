@@ -2,174 +2,215 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-import json
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Literal
+from typing import Dict, List, Optional, Any
 
 from .database import Database, DatabaseConfig
-
-TestStatus = Literal["passed", "failed", "skipped", "xfailed", "xpassed"]
 
 
 @dataclass
 class TestResult:
-    """Record of a test execution."""
+    """Test result record."""
 
     test_file: str
     test_name: str
-    status: TestStatus
+    status: str  # passed, failed, skipped, xfailed, xpassed
     duration: float
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     stack_trace: Optional[str] = None
     timestamp: Optional[datetime] = None
     modified_files: Optional[List[str]] = None
-    commit_id: Optional[str] = None  # The commit that was being tested
-    commit_message: Optional[str] = None  # What the commit was trying to do
+    commit_id: Optional[str] = None
+    commit_message: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self):
+        """Initialize optional fields."""
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
+        if self.modified_files is None:
+            self.modified_files = []
+        if self.metadata is None:
+            self.metadata = {}
 
 
 class TestHistory:
-    """Manages test execution history in the database."""
+    """Manages test execution history."""
 
     def __init__(self, workspace_dir: Path):
         """Initialize test history.
 
         Args:
-            workspace_dir: Workspace directory path
+            workspace_dir: Base directory for test history
         """
-        config = DatabaseConfig(workspace_dir=workspace_dir)
-        self.db = Database(config)
+        self.db = Database(DatabaseConfig(workspace_dir, filename=".test_history.db"))
 
-    def record_test_run(self, test_results: List[TestResult]) -> bool:
-        """Record results from a test run.
+    def record_test_run(self, results: List[TestResult]) -> bool:
+        """Record test results.
 
         Args:
-            test_results: List of test results from the run
+            results: List of test results to record
 
         Returns:
             True if results were recorded successfully
         """
-        success = True
-        for result in test_results:
-            # Insert test result record
-            query = """
-                INSERT INTO test_results (
-                    test_file, test_name, status, duration,
-                    error_type, error_message, stack_trace,
-                    timestamp, commit_id, commit_message, metadata
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            params = (
-                result.test_file,
-                result.test_name,
-                result.status,
-                result.duration,
-                result.error_type,
-                result.error_message,
-                result.stack_trace,
-                (
-                    result.timestamp.isoformat()
-                    if result.timestamp
-                    else datetime.now().isoformat()
-                ),
-                result.commit_id,
-                result.commit_message,
-                json.dumps(result.metadata) if result.metadata else None,
-            )
+        try:
+            with self.db.get_connection() as conn:
+                for result in results:
+                    # Insert test result
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO test_results (
+                            test_file, test_name, status, duration,
+                            error_type, error_message, stack_trace,
+                            timestamp, commit_id, commit_message, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            result.test_file,
+                            result.test_name,
+                            result.status,
+                            result.duration,
+                            result.error_type,
+                            result.error_message,
+                            result.stack_trace,
+                            result.timestamp.isoformat(),
+                            result.commit_id,
+                            result.commit_message,
+                            str(result.metadata),
+                        ),
+                    )
 
-            cursor = self.db.execute(query, params)
-            if not cursor:
-                success = False
-                continue
+                    # Insert modified files
+                    result_id = cursor.lastrowid
+                    for file_path in result.modified_files:
+                        conn.execute(
+                            """
+                            INSERT INTO test_run_files (result_id, file_path)
+                            VALUES (?, ?)
+                            """,
+                            (result_id, file_path),
+                        )
 
-            # Record modified files if any
-            if result.modified_files:
-                result_id = cursor.lastrowid
-                for file_path in result.modified_files:
-                    query = """
-                        INSERT INTO test_run_files (result_id, file_path)
-                        VALUES (?, ?)
-                    """
-                    self.db.execute(query, (result_id, file_path))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"Error recording test results: {e}")
+            return False
 
-        return success
-
-    def get_test_history(self, test_file: str, limit: int = 10) -> List[TestResult]:
-        """Get history of test executions.
+    def get_test_history(
+        self, test_file: str, limit: Optional[int] = None
+    ) -> List[TestResult]:
+        """Get history for a specific test.
 
         Args:
             test_file: Test file path
-            limit: Maximum number of records to return
+            limit: Optional limit on number of results
 
         Returns:
-            List of test results for the test
+            List of test results in reverse chronological order
         """
-        query = """
-            SELECT r.*, GROUP_CONCAT(f.file_path) as modified_files
-            FROM test_results r
-            LEFT JOIN test_run_files f ON r.id = f.result_id
-            WHERE r.test_file = ?
-            GROUP BY r.id
-            ORDER BY r.timestamp DESC
-            LIMIT ?
-        """
+        try:
+            with self.db.get_connection() as conn:
+                # Get test results
+                query = """
+                SELECT r.*, GROUP_CONCAT(f.file_path) as modified_files
+                FROM test_results r
+                LEFT JOIN test_run_files f ON r.id = f.result_id
+                WHERE r.test_file = ?
+                GROUP BY r.id
+                ORDER BY r.timestamp DESC
+                """
+                if limit:
+                    query += f" LIMIT {limit}"
 
-        cursor = self.db.execute(query, (test_file, limit))
-        if not cursor:
+                cursor = conn.execute(query, (test_file,))
+                rows = cursor.fetchall()
+
+                results = []
+                for row in rows:
+                    # Convert modified files string to list
+                    modified_files = (
+                        row["modified_files"].split(",")
+                        if row["modified_files"]
+                        else []
+                    )
+
+                    result = TestResult(
+                        test_file=row["test_file"],
+                        test_name=row["test_name"],
+                        status=row["status"],
+                        duration=row["duration"],
+                        error_type=row["error_type"],
+                        error_message=row["error_message"],
+                        stack_trace=row["stack_trace"],
+                        timestamp=datetime.fromisoformat(row["timestamp"]),
+                        modified_files=modified_files,
+                        commit_id=row["commit_id"],
+                        commit_message=row["commit_message"],
+                        metadata=eval(row["metadata"]) if row["metadata"] else {},
+                    )
+                    results.append(result)
+
+                return results
+        except Exception as e:
+            print(f"Error getting test history: {e}")
             return []
 
-        results = []
-        for row in cursor:
-            modified_files = (
-                row["modified_files"].split(",") if row["modified_files"] else None
-            )
-
-            metadata = json.loads(row["metadata"]) if row["metadata"] else None
-
-            result = TestResult(
-                test_file=row["test_file"],
-                test_name=row["test_name"],
-                status=row["status"],
-                duration=row["duration"],
-                error_type=row["error_type"],
-                error_message=row["error_message"],
-                stack_trace=row["stack_trace"],
-                timestamp=datetime.fromisoformat(row["timestamp"]),
-                modified_files=modified_files,
-                commit_id=row["commit_id"],
-                commit_message=row["commit_message"],
-                metadata=metadata,
-            )
-            results.append(result)
-
-        return results
-
-    def get_test_summary(self, test_file: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Get summarized history of test executions.
+    def get_test_summary(self, test_file: str) -> List[Dict[str, Any]]:
+        """Get summary of test history.
 
         Args:
             test_file: Test file path
-            limit: Maximum number of records to return
 
         Returns:
-            List of summarized test results with timestamps and outcomes
+            List of test result summaries
         """
-        results = self.get_test_history(test_file, limit)
-        return [
-            {
-                "timestamp": result.timestamp.isoformat(),
-                "status": result.status,
-                "duration": result.duration,
-                "error_type": result.error_type,
-                "modified_files": result.modified_files,
-                "commit_id": result.commit_id,
-                "commit_message": result.commit_message,
-                "id": idx,  # Add an ID to reference this result later
-            }
-            for idx, result in enumerate(results)
-        ]
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        status,
+                        error_type,
+                        timestamp,
+                        duration,
+                        commit_id,
+                        commit_message,
+                        GROUP_CONCAT(f.file_path) as modified_files
+                    FROM test_results r
+                    LEFT JOIN test_run_files f ON r.id = f.result_id
+                    WHERE r.test_file = ?
+                    GROUP BY r.id
+                    ORDER BY r.timestamp DESC
+                    """,
+                    (test_file,),
+                )
+                rows = cursor.fetchall()
+
+                summaries = []
+                for row in rows:
+                    modified_files = (
+                        row["modified_files"].split(",")
+                        if row["modified_files"]
+                        else []
+                    )
+                    summaries.append(
+                        {
+                            "status": row["status"],
+                            "error_type": row["error_type"],
+                            "timestamp": row["timestamp"],
+                            "duration": row["duration"],
+                            "commit_id": row["commit_id"],
+                            "commit_message": row["commit_message"],
+                            "modified_files": modified_files,
+                        }
+                    )
+                return summaries
+        except Exception as e:
+            print(f"Error getting test summary: {e}")
+            return []
 
     def get_detailed_result(
         self, test_file: str, result_id: int
@@ -178,99 +219,45 @@ class TestHistory:
 
         Args:
             test_file: Test file path
-            result_id: ID of the test result to retrieve
+            result_id: ID of the test result
 
         Returns:
-            Detailed test result if found
+            TestResult if found, None otherwise
         """
-        query = """
-            SELECT r.*, GROUP_CONCAT(f.file_path) as modified_files
-            FROM test_results r
-            LEFT JOIN test_run_files f ON r.id = f.result_id
-            WHERE r.test_file = ?
-            GROUP BY r.id
-            ORDER BY r.timestamp DESC
-            LIMIT 1 OFFSET ?
-        """
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT r.*, GROUP_CONCAT(f.file_path) as modified_files
+                    FROM test_results r
+                    LEFT JOIN test_run_files f ON r.id = f.result_id
+                    WHERE r.test_file = ? AND r.id = ?
+                    GROUP BY r.id
+                    """,
+                    (test_file, result_id),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
 
-        cursor = self.db.execute(query, (test_file, result_id))
-        if not cursor:
+                modified_files = (
+                    row["modified_files"].split(",") if row["modified_files"] else []
+                )
+
+                return TestResult(
+                    test_file=row["test_file"],
+                    test_name=row["test_name"],
+                    status=row["status"],
+                    duration=row["duration"],
+                    error_type=row["error_type"],
+                    error_message=row["error_message"],
+                    stack_trace=row["stack_trace"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    modified_files=modified_files,
+                    commit_id=row["commit_id"],
+                    commit_message=row["commit_message"],
+                    metadata=eval(row["metadata"]) if row["metadata"] else {},
+                )
+        except Exception as e:
+            print(f"Error getting detailed result: {e}")
             return None
-
-        row = cursor.fetchone()
-        if not row:
-            return None
-
-        modified_files = (
-            row["modified_files"].split(",") if row["modified_files"] else None
-        )
-        metadata = json.loads(row["metadata"]) if row["metadata"] else None
-
-        return TestResult(
-            test_file=row["test_file"],
-            test_name=row["test_name"],
-            status=row["status"],
-            duration=row["duration"],
-            error_type=row["error_type"],
-            error_message=row["error_message"],
-            stack_trace=row["stack_trace"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
-            modified_files=modified_files,
-            commit_id=row["commit_id"],
-            commit_message=row["commit_message"],
-            metadata=metadata,
-        )
-
-    def record_fix(
-        self,
-        test_file: str,
-        fixed_by: str,
-        description: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Record a fix for the most recent failure of a test.
-
-        Args:
-            test_file: Test file path
-            fixed_by: Description of what fixed the failure
-            description: Detailed description of the fix
-            metadata: Additional metadata about the fix
-
-        Returns:
-            True if fix was recorded successfully
-        """
-        query = """
-            UPDATE test_results
-            SET fixed_by = ?, fix_description = ?, metadata = ?
-            WHERE test_file = ?
-              AND status = 'failed'
-              AND id = (
-                  SELECT id FROM test_results
-                  WHERE test_file = ?
-                  AND status = 'failed'
-                  ORDER BY timestamp DESC
-                  LIMIT 1
-              )
-        """
-
-        cursor = self.db.execute(
-            query,
-            (
-                fixed_by,
-                description,
-                json.dumps(metadata) if metadata else None,
-                test_file,
-                test_file,
-            ),
-        )
-        return cursor is not None
-
-    def clear_history(self) -> bool:
-        """Clear all test history.
-
-        Returns:
-            True if history was cleared successfully
-        """
-        self.db.execute("DELETE FROM test_run_files")
-        cursor = self.db.execute("DELETE FROM test_results")
-        return cursor is not None

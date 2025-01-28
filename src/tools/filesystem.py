@@ -4,13 +4,15 @@ File system operations for Anthropic CLI integration.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, Optional, Union, List, TYPE_CHECKING, Callable
 import tempfile
 
 from .types import ToolResponse, ToolResponseStatus
 from ..security.core_context import SecurityContext
 from ..utils.string_sanitizer import sanitize_text
-from .implementations import ToolImplementations
+
+if TYPE_CHECKING:
+    from .implementations import ToolImplementations
 
 
 class FileSystemError(Exception):
@@ -575,32 +577,65 @@ class FileSystemTools:
             )
 
 
-def register_filesystem_tools(tool_impl: ToolImplementations) -> None:
+def create_filesystem_tools(
+    workspace_dir: Optional[Path],
+    allowed_paths: Optional[List[Path]],
+    security_context: SecurityContext,
+) -> Dict[str, Callable]:
+    """Create filesystem tools.
+
+    Args:
+        workspace_dir: Base directory for file operations
+        allowed_paths: List of paths that can be accessed
+        security_context: Security context for operations
+
+    Returns:
+        Dict of tool name to tool function
+    """
+    fs = FileSystemTools(
+        workspace_dir=workspace_dir,
+        allowed_paths=allowed_paths,
+    )
+    fs.security_context = security_context
+
+    return {
+        "read_file": fs.read_file,
+        "write_file": fs.write_file,
+        "list_directory": fs.list_directory,
+        "delete_file": fs.delete_file,
+        "create_directory": fs.create_directory,
+        "delete_directory": fs.delete_directory,
+    }
+
+
+def register_filesystem_tools(tool_impl: "ToolImplementations") -> None:
     """Register filesystem tools with ToolImplementations.
 
     Args:
-        tool_impl: ToolImplementations instance
+        tool_impl: Tool registry to register with
     """
-    fs_tools = tool_impl.fs_tools
+    tools = create_filesystem_tools(
+        tool_impl.workspace_dir, tool_impl.allowed_paths, tool_impl.security_context
+    )
 
     tool_impl.register_tool(
         "read_file",
-        fs_tools.read_file,
+        tools["read_file"],
         schema={
             "description": "Read a file with security checks",
             "parameters": {
-                "path": {"type": "string", "description": "Path to the file to read"}
+                "path": {"type": "string", "description": "Path to file to read"},
             },
         },
     )
 
     tool_impl.register_tool(
         "write_file",
-        fs_tools.write_file,
+        tools["write_file"],
         schema={
             "description": "Write to a file with security checks",
             "parameters": {
-                "path": {"type": "string", "description": "Path to the file to write"},
+                "path": {"type": "string", "description": "Path to file to write"},
                 "content": {"type": "string", "description": "Content to write"},
             },
         },
@@ -608,44 +643,50 @@ def register_filesystem_tools(tool_impl: ToolImplementations) -> None:
 
     tool_impl.register_tool(
         "list_directory",
-        fs_tools.list_directory,
+        tools["list_directory"],
         schema={
             "description": "List contents of a directory",
             "parameters": {
-                "path": {"type": "string", "description": "Directory to list"}
+                "path": {"type": "string", "description": "Path to directory to list"},
             },
         },
     )
 
     tool_impl.register_tool(
         "delete_file",
-        fs_tools.delete_file,
+        tools["delete_file"],
         schema={
             "description": "Delete a file",
             "parameters": {
-                "path": {"type": "string", "description": "Path to the file to delete"}
+                "path": {"type": "string", "description": "Path to file to delete"},
             },
         },
     )
 
     tool_impl.register_tool(
         "create_directory",
-        fs_tools.create_directory,
+        tools["create_directory"],
         schema={
             "description": "Create a directory",
             "parameters": {
-                "path": {"type": "string", "description": "Path to directory to create"}
+                "path": {
+                    "type": "string",
+                    "description": "Path to directory to create",
+                },
             },
         },
     )
 
     tool_impl.register_tool(
         "delete_directory",
-        fs_tools.delete_directory,
+        tools["delete_directory"],
         schema={
             "description": "Delete a directory",
             "parameters": {
-                "path": {"type": "string", "description": "Path to directory to delete"}
+                "path": {
+                    "type": "string",
+                    "description": "Path to directory to delete",
+                },
             },
         },
     )

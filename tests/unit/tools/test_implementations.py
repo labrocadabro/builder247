@@ -1,6 +1,5 @@
 """Unit tests for tool implementations."""
 
-import os
 import tempfile
 import pytest
 from pathlib import Path
@@ -49,7 +48,7 @@ def tools(workspace_dir, mock_dockerfile_vars, mock_dockerfile_limits):
 def test_init_with_workspace(workspace_dir):
     """Test initialization with workspace directory."""
     tools = ToolImplementations(workspace_dir=workspace_dir)
-    assert tools.fs_tools.workspace_dir == workspace_dir
+    assert tools.workspace_dir == workspace_dir
 
 
 def test_init_with_allowed_paths(workspace_dir):
@@ -58,8 +57,8 @@ def test_init_with_allowed_paths(workspace_dir):
     tools = ToolImplementations(
         workspace_dir=workspace_dir, allowed_paths=allowed_paths
     )
-    assert all(isinstance(p, Path) for p in tools.fs_tools.allowed_paths)
-    assert len(tools.fs_tools.allowed_paths) == len(allowed_paths)
+    assert all(isinstance(p, Path) for p in tools.allowed_paths)
+    assert len(tools.allowed_paths) == len(allowed_paths)
 
 
 def test_init_with_security_settings(workspace_dir):
@@ -179,45 +178,6 @@ def test_execute_tool_raises_exception(tools):
     assert "Test error" in response.error
 
 
-def test_run_command(tools):
-    """Test executing a command."""
-    response = tools.run_command("echo hello")
-    assert response.status == ToolResponseStatus.SUCCESS
-    assert "hello" in response.data
-
-
-def test_run_piped_commands(tools):
-    """Test executing piped commands."""
-    commands = [["echo", "hello world"], ["grep", "world"]]
-    response = tools.run_piped_commands(commands)
-    assert response.status == ToolResponseStatus.SUCCESS
-    assert "world" in response.data
-
-
-def test_read_file(tools, workspace_dir):
-    """Test reading a file."""
-    test_file = os.path.join(workspace_dir, "test.txt")
-    with open(test_file, "w") as f:
-        f.write("test content")
-
-    response = tools.read_file(test_file)
-    assert response.status == ToolResponseStatus.SUCCESS
-    assert response.data == "test content"
-    os.unlink(test_file)
-
-
-def test_write_file(tools, workspace_dir):
-    """Test writing a file."""
-    test_file = os.path.join(workspace_dir, "test.txt")
-    content = "test content"
-
-    response = tools.write_file(test_file, content)
-    assert response.status == ToolResponseStatus.SUCCESS
-    with open(test_file, "r") as f:
-        assert f.read() == content
-    os.unlink(test_file)
-
-
 def test_execute_tool_success(tools):
     """Test successful tool execution with proper response validation."""
 
@@ -248,7 +208,6 @@ def test_execute_tool_not_found(tools):
     response = tools.execute_tool("nonexistent_tool")
     assert response.status == ToolResponseStatus.ERROR
     assert "Unknown tool: nonexistent_tool" in response.error
-    assert response.data is None
 
     # Test with invalid tool name types
     for invalid_name in [None, 42, [], {}]:

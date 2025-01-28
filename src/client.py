@@ -10,7 +10,7 @@ import tiktoken
 from anthropic import Anthropic
 from anthropic.types import MessageParam
 
-from .history_manager import ConversationHistoryManager
+from .storage.history import ConversationHistoryManager
 
 
 @dataclass

@@ -1,7 +1,7 @@
-"""Unit tests for conversation history management."""
+"""Tests for conversation history management."""
 
 import pytest
-from src.history_manager import ConversationHistoryManager
+from src.storage.history import ConversationHistoryManager
 from tests.utils.fixtures import temp_dir
 import os
 
