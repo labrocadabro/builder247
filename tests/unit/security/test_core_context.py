@@ -78,7 +78,7 @@ def test_get_environment_empty():
 
 
 def test_sanitize_output(security_context):
-    """Test output sanitization with redaction."""
+    """Test output sanitization by removing protected values."""
     # Set up test environment variables
     os.environ.update(
         {
@@ -88,18 +88,17 @@ def test_sanitize_output(security_context):
         }
     )
 
-    # Test redaction of protected variables
+    # Test removal of protected variables
     output = "API key is secret123 and secret is topsecret"
     sanitized = security_context.sanitize_output(output)
     assert "secret123" not in sanitized
     assert "topsecret" not in sanitized
-    assert "[REDACTED:DOCKER_API_KEY]" in sanitized
-    assert "[REDACTED:DOCKER_SECRET]" in sanitized
+    assert sanitized == "API key is  and secret is "
 
-    # Test no redaction of non-protected variables
+    # Test no removal of non-protected variables
     output = "The secret is verysecret"
     sanitized = security_context.sanitize_output(output)
-    assert "verysecret" in sanitized  # Should not be redacted
+    assert "verysecret" in sanitized  # Should not be removed
 
     # Clean up
     for key in ["DOCKER_API_KEY", "DOCKER_SECRET", "TEST_SECRET"]:
@@ -121,7 +120,7 @@ def test_sanitize_output_multiple_occurrences(security_context):
     sanitized = security_context.sanitize_output(output)
 
     assert "secret123" not in sanitized
-    assert sanitized.count("[REDACTED:DOCKER_API_KEY]") == 3
+    assert sanitized == "Key1: , Key2: , Key3: "
 
     del os.environ["DOCKER_API_KEY"]
 
@@ -134,10 +133,8 @@ def test_sanitize_output_substring(security_context):
     output = "secret=123 secretive secretary"
     sanitized = security_context.sanitize_output(output)
 
-    # Only exact "secret" should be replaced
-    assert "[REDACTED:DOCKER_API_KEY]" in sanitized
-    assert "secretive" in sanitized
-    assert "secretary" in sanitized
+    # Any instance of "secret" should be replaced
+    assert "secret" not in sanitized
 
     del os.environ["DOCKER_API_KEY"]
 

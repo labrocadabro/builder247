@@ -54,14 +54,14 @@ class SecurityContext:
         return env
 
     def sanitize_output(self, output: str, env: Dict[str, str] | None = None) -> str:
-        """Sanitize command output by redacting protected values.
+        """Sanitize command output by removing protected values.
 
         Args:
             output: Command output to sanitize
             env: Optional environment variables to check for protected values
 
         Returns:
-            Sanitized output with protected values redacted
+            Sanitized output with protected values removed
         """
         if not output:
             return output
@@ -72,10 +72,10 @@ class SecurityContext:
             if var in os.environ:
                 protected_values[var] = os.environ[var]
 
-        # Redact protected values
+        # Remove protected values
         result = output
         for var, value in protected_values.items():
             if value and value in result:
-                result = result.replace(value, f"[REDACTED:{var}]")
+                result = result.replace(value, "")
 
         return result
