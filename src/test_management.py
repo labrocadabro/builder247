@@ -3,14 +3,12 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
-import json
+from typing import Dict, List, Optional, Callable
 
-from .client import AnthropicClient
 from .tools import ToolImplementations
 from .tools.types import ToolResponseStatus
 from .utils.monitoring import ToolLogger
-from .utils.retry import RetryConfig, with_retry
+from .utils.retry import RetryConfig
 from .acceptance_criteria import CriteriaManager, CriteriaStatus
 
 
@@ -38,28 +36,28 @@ class TestManager:
     def __init__(
         self,
         workspace_dir: Path,
-        llm_client: AnthropicClient,
         tools: ToolImplementations,
         logger: ToolLogger,
         criteria_manager: CriteriaManager,
         retry_config: RetryConfig = None,
+        parse_test_results: Optional[Callable[[str], List[Dict]]] = None,
     ):
         """Initialize test manager.
 
         Args:
             workspace_dir: Project workspace directory
-            llm_client: Client for LLM interaction
             tools: Tool implementations
             logger: Logger instance
             criteria_manager: Criteria manager instance
             retry_config: Optional retry configuration
+            parse_test_results: Optional callback for parsing test results using LLM
         """
         self.workspace_dir = workspace_dir
-        self.llm_client = llm_client
         self.tools = tools
         self.logger = logger
         self.criteria_manager = criteria_manager
         self.retry_config = retry_config or RetryConfig()
+        self.parse_test_results = parse_test_results
         self._recent_changes = []
         self._test_history = []
 
@@ -69,30 +67,23 @@ class TestManager:
         """Run tests with retries and track failures.
 
         Args:
-            commit_id: ID of commit being tested
-            commit_message: Message describing what the commit was trying to do
+            commit_id: Optional commit ID being tested
+            commit_message: Optional commit message
 
         Returns:
             True if tests pass, False otherwise
         """
-
-        def run_tests():
-            return self.tools.run_command("python -m pytest --verbose")
-
         try:
-            result = with_retry(
-                run_tests, config=self.retry_config, logger=self.logger.logger
-            )
-
+            result = self.tools.run_command("python -m pytest --verbose")
             if result.status != ToolResponseStatus.SUCCESS:
-                # Parse test output to record failures
-                self._record_test_results(
-                    result.output, self._recent_changes, commit_id, commit_message
-                )
+                if self.parse_test_results:
+                    # Parse test output using provided callback
+                    test_results = self.parse_test_results(result.output)
+                    self._record_test_results(
+                        test_results, self._recent_changes, commit_id, commit_message
+                    )
                 return False
-
             return True
-
         except Exception as e:
             self.logger.log_error("run_tests", str(e))
             return False
@@ -214,44 +205,19 @@ class TestManager:
 
     def _record_test_results(
         self,
-        test_output: str,
+        test_results: List[Dict],
         recent_changes: List[str],
         commit_id: Optional[str] = None,
         commit_message: Optional[str] = None,
     ) -> None:
-        """Record test results and update criteria status.
+        """Record test results.
 
         Args:
-            test_output: Raw test output to parse
+            test_results: List of parsed test results
             recent_changes: List of recently modified files
             commit_id: Optional commit ID being tested
             commit_message: Optional commit message
         """
-        # Have LLM parse test output into structured results
-        prompt = f"""Analyze the following test output and return a list of test results in JSON format.
-Each test result should include:
-- test_file: str (file containing the test)
-- test_name: str (name/identifier of the test)
-- status: str (one of: passed, failed, skipped, xfailed, xpassed)
-- duration: float (test duration in seconds)
-- error_type: str | null (type of error if failed)
-- error_message: str | null (error message if failed)
-- stack_trace: str | null (error stack trace if failed)
-
-Test output:
-{test_output}
-"""
-        response_text, _ = self.llm_client.send_message(prompt)
-
-        try:
-            test_results = json.loads(response_text)
-        except json.JSONDecodeError:
-            self.logger.log_error(
-                "record_test_results", "Failed to parse LLM response as JSON"
-            )
-            return
-
-        # Record each test result
         for result_data in test_results:
             # Create TestResult object
             result = TestResult(

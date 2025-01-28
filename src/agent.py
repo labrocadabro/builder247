@@ -4,7 +4,7 @@ import os
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 from .client import AnthropicClient
@@ -13,7 +13,7 @@ from .tools.types import ToolResponse, ToolResponseStatus
 from .utils.monitoring import ToolLogger
 from .utils.retry import RetryConfig
 from .acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
-from .test_management import TestManager, TestHistory, TestResult
+from .test_management import TestManager
 from .tools.filesystem import register_filesystem_tools
 from .tools.command import register_command_tools
 from .tools.git import register_git_tools
@@ -64,9 +64,6 @@ class ImplementationAgent:
         register_command_tools(self.tools)
         register_git_tools(self.tools)
 
-        # Initialize test history tracking
-        self.test_history = TestHistory(config.workspace_dir)
-
         # Initialize client for AI interactions
         api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -86,22 +83,157 @@ class ImplementationAgent:
         # Initialize acceptance criteria manager
         self.criteria_manager = AcceptanceCriteriaManager(config.workspace_dir)
 
-        # Initialize test manager
+        # Initialize test manager with callback
         self.test_manager = TestManager(
             workspace_dir=config.workspace_dir,
-            llm_client=self.client,
             tools=self.tools,
             logger=self.logger,
             criteria_manager=self.criteria_manager,
             retry_config=self.retry_config,
+            parse_test_results=self._parse_test_results,
         )
 
+        # Initialize phase manager with callback
         self.phase_manager = PhaseManager(
-            client=self.client,
             tools=self.tools,
             logger=self.logger,
             max_retries=config.max_retries,
+            execute_phase=self._execute_phase,
         )
+
+    def _parse_test_results(self, test_output: str) -> List[Dict]:
+        """Parse test output using LLM.
+
+        Args:
+            test_output: Raw test output to parse
+
+        Returns:
+            List of parsed test results
+        """
+        prompt = f"""Analyze the following test output and return a list of test results in JSON format.
+Each test result should include:
+- test_file: str (file containing the test)
+- test_name: str (name/identifier of the test)
+- status: str (one of: passed, failed, skipped, xfailed, xpassed)
+- duration: float (test duration in seconds)
+- error_type: str | null (type of error if failed)
+- error_message: str | null (error message if failed)
+- stack_trace: str | null (error stack trace if failed)
+
+Test output:
+{test_output}
+"""
+        response_text, _ = self.client.send_message(prompt)
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            self.logger.log_error(
+                "parse_test_results", "Failed to parse LLM response as JSON"
+            )
+            return []
+
+    def _execute_phase(
+        self, context: Dict, phase: str
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Execute a phase using LLM.
+
+        Args:
+            context: Phase context
+            phase: Current phase
+
+        Returns:
+            Tuple of (response text, tool calls)
+        """
+        # Create focused message with phase context
+        message = self._create_phase_message(context, phase)
+        return self.client.send_message(message)
+
+    def _create_phase_message(self, context: Dict, phase: str) -> str:
+        """Create message for phase execution.
+
+        Args:
+            context: Phase context
+            phase: Current phase
+
+        Returns:
+            Formatted message for LLM
+        """
+        message = []
+
+        # Add error context if any
+        if "last_error" in context:
+            message.extend(
+                [
+                    f"\nLast Error: {context['last_error']}",
+                    f"Attempt {context.get('attempts', 1)} of {self.config.max_retries}",
+                ]
+            )
+
+        # Add phase-specific context
+        message.extend(
+            [
+                f"\nPhase: {phase}",
+                f"\nTodo item: {context['todo']}",
+                "\nAcceptance Criteria:",
+                *[f"- {c}" for c in context["criteria"]],
+            ]
+        )
+
+        if phase == ImplementationPhase.ANALYSIS:
+            message.extend(
+                [
+                    "\nInstructions:",
+                    "1. Review the requirements",
+                    "2. Identify files that need changes",
+                    "3. List specific changes needed for each criterion",
+                ]
+            )
+
+        elif phase == ImplementationPhase.IMPLEMENTATION:
+            message.extend(
+                [
+                    "\nPlanned Changes:",
+                    *[
+                        f"- {change['description']} (for {change['criterion']})"
+                        for change in context.get("planned_changes", [])
+                    ],
+                    "\nCurrent Change:",
+                    str(context.get("current_change", "")),
+                    "\nInstructions:",
+                    "1. Implement the planned changes",
+                    "2. Ensure changes match the requirements",
+                    "3. Add necessary error handling and edge cases",
+                ]
+            )
+
+        elif phase == ImplementationPhase.TESTING:
+            message.extend(
+                [
+                    "\nImplemented Changes:",
+                    *context.get("implemented_changes", []),
+                    "\nCriterion to Test:",
+                    context.get("current_criterion", ""),
+                    "\nInstructions:",
+                    "1. Create tests following the test template",
+                    "2. Group related test cases",
+                    "3. Add clear docstrings",
+                    "4. Include edge cases",
+                ]
+            )
+
+        elif phase == ImplementationPhase.FIXES:
+            message.extend(
+                [
+                    "\nTest Results:",
+                    str(context.get("test_results", {})),
+                    "\nInstructions:",
+                    "1. Analyze the test failures",
+                    "2. Determine if test or implementation needs fixing",
+                    "3. Make necessary changes",
+                ]
+            )
+
+        return "\n".join(message)
 
     def implement_todo(self, todo_item: str, acceptance_criteria: List[str]) -> bool:
         """Implement a todo item according to acceptance criteria."""

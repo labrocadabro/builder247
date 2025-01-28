@@ -1,11 +1,10 @@
-"""Phase management functionality."""
+"""Phase management for implementation workflow."""
 
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any, Tuple
 
-from .client import AnthropicClient
 from .tools import ToolImplementations
 from .tools.types import ToolResponse, ToolResponseStatus
 from .tools.execution import ToolExecutor
@@ -14,7 +13,7 @@ from .acceptance_criteria import CriteriaStatus
 
 
 class ImplementationPhase(str, Enum):
-    """Phases of implementation process."""
+    """Implementation workflow phases."""
 
     ANALYSIS = "analysis"
     IMPLEMENTATION = "implementation"
@@ -24,7 +23,7 @@ class ImplementationPhase(str, Enum):
 
 @dataclass
 class PhaseState:
-    """State of an implementation phase."""
+    """State tracking for a phase."""
 
     phase: ImplementationPhase
     attempts: int = 0
@@ -37,23 +36,25 @@ class PhaseManager:
 
     def __init__(
         self,
-        client: AnthropicClient,
         tools: ToolImplementations,
         logger: ToolLogger,
         max_retries: int = 3,
+        execute_phase: Optional[
+            Callable[[Dict, str], Tuple[str, List[Dict[str, Any]]]]
+        ] = None,
     ):
         """Initialize phase manager.
 
         Args:
-            client: Client for LLM interaction
             tools: Tool implementations
             logger: Logger instance
             max_retries: Maximum retry attempts per phase
+            execute_phase: Optional callback for executing phases using LLM
         """
-        self.client = client
         self.tools = tools
         self.logger = logger
         self.max_retries = max_retries
+        self.execute_phase = execute_phase
         self.tool_executor = ToolExecutor(tools, logger)
 
     def run_phase_with_recovery(
@@ -66,7 +67,7 @@ class PhaseManager:
 
         Args:
             phase_state: Current phase state
-            context: Context for phase execution
+            context: Implementation context
             validator: Function to validate phase results
 
         Returns:
@@ -74,11 +75,18 @@ class PhaseManager:
         """
         while True:
             try:
-                # Create focused message with error context if any
-                message = self._create_message_with_context(context, phase_state)
+                if not self.execute_phase:
+                    self.logger.log_error(
+                        "run_phase",
+                        "No phase execution callback provided",
+                        {"phase": phase_state.phase},
+                    )
+                    return None
 
-                # Get LLM response
-                response_text, tool_calls = self.client.send_message(message)
+                # Execute phase using callback
+                response_text, tool_calls = self.execute_phase(
+                    context, phase_state.phase
+                )
 
                 # Check for task abandonment
                 if "ABANDON_TASK:" in response_text:
@@ -86,7 +94,7 @@ class PhaseManager:
                     return None
 
                 # Execute tools
-                results = self.tool_executor.execute_tools(tool_calls)
+                results = self._execute_tools(tool_calls)
                 if not results:
                     phase_state.last_error = "Tool execution failed"
                     if phase_state.attempts >= self.max_retries:
@@ -144,8 +152,19 @@ class PhaseManager:
         return results
 
     def _execute_tool_safely(self, tool_call: Dict) -> ToolResponse:
-        """Execute a tool call and track changes."""
-        return self.tools.execute_tool(tool_call)
+        """Execute a tool call safely.
+
+        Args:
+            tool_call: Tool call details
+
+        Returns:
+            Tool execution response
+        """
+        try:
+            return self.tools.execute_tool(tool_call)
+        except Exception as e:
+            self.logger.log_error("execute_tool", str(e))
+            return ToolResponse(status=ToolResponseStatus.ERROR, error=str(e))
 
     def _create_message_with_context(
         self, context: Dict, phase_state: PhaseState
@@ -308,19 +327,30 @@ class PhaseManager:
 
         return "\n\n".join(content) if content else ""
 
-    def _handle_task_abandoned(self, response_text: str, criteria: List[str]) -> None:
-        """Handle task abandonment."""
-        error_msg = response_text.split("ABANDON_TASK:")[1].strip()
-        self.logger.log_error("task_abandoned", error_msg)
+    def _handle_task_abandoned(self, reason: str, criteria: List[str]) -> None:
+        """Handle task abandonment.
+
+        Args:
+            reason: Why the task was abandoned
+            criteria: List of acceptance criteria
+        """
+        self.logger.log_error(
+            "abandon_task", "Task determined impossible", {"reason": reason}
+        )
         for criterion in criteria:
             self.criteria_manager.update_criterion_status(
-                criterion, CriteriaStatus.FAILED, error_msg
+                criterion, CriteriaStatus.FAILED, reason
             )
 
     def _handle_phase_failed(
         self, phase_state: PhaseState, criteria: List[str]
     ) -> None:
-        """Handle a phase failing after max retries."""
+        """Handle phase failure after max retries.
+
+        Args:
+            phase_state: Current phase state
+            criteria: List of acceptance criteria
+        """
         error_msg = (
             f"Phase {phase_state.phase} failed after {phase_state.attempts} attempts"
         )
@@ -334,16 +364,20 @@ class PhaseManager:
             error_msg,
             {"phase": phase_state.phase, "attempts": phase_state.attempts},
         )
-
         for criterion in criteria:
             self.criteria_manager.update_criterion_status(
                 criterion, CriteriaStatus.FAILED, error_msg
             )
 
     def _handle_error(self, error: Exception, criteria: List[str]) -> None:
-        """Handle an error during phase execution."""
+        """Handle error during phase execution.
+
+        Args:
+            error: The exception that occurred
+            criteria: List of acceptance criteria
+        """
         error_msg = str(error)
-        self.logger.log_error("phase_error", error_msg)
+        self.logger.log_error("phase_execution", error_msg)
         for criterion in criteria:
             self.criteria_manager.update_criterion_status(
                 criterion, CriteriaStatus.FAILED, error_msg
