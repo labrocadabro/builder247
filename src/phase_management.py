@@ -100,9 +100,13 @@ class PhaseManager:
                     }
 
                 # Execute tools
+                self._current_phase_state = phase_state
                 results = self._execute_tools(tool_calls)
+                self._current_phase_state = None
                 if not results:
-                    phase_state.last_error = "Tool execution failed"
+                    phase_state.last_error = (
+                        phase_state.last_error or "Tool execution failed"
+                    )
                     phase_state.attempts += 1
                     continue
 
@@ -142,6 +146,8 @@ class PhaseManager:
         for tool_call in tool_calls:
             result = self._execute_tool_safely(tool_call)
             if result.status != ToolResponseStatus.SUCCESS:
+                if hasattr(self, "_current_phase_state") and self._current_phase_state:
+                    self._current_phase_state.last_error = result.error
                 return None
 
             # Track results based on tool type

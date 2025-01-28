@@ -6,6 +6,8 @@ from unittest.mock import Mock
 from src.tools.execution import ToolExecutor
 from src.tools.types import ToolResponse, ToolResponseStatus
 
+from src.utils.monitoring import ToolLogger
+
 
 @pytest.fixture
 def mock_tools():
@@ -172,3 +174,51 @@ class TestToolExecutor:
         assert len(executor._recent_changes) == 2
         assert "test1.py" in executor._recent_changes
         assert "test2.py" in executor._recent_changes
+
+    def test_tool_execution_success():
+        """Test successful tool execution."""
+        tools = Mock()
+        logger = Mock(spec=ToolLogger)
+        executor = ToolExecutor(tools, logger)
+
+        tool_call = {"name": "test_tool", "parameters": {"param": "value"}}
+        tools.execute_tool.return_value = ToolResponse(
+            status=ToolResponseStatus.SUCCESS, data="test output"
+        )
+
+        response = executor.execute_tool(tool_call)
+
+        assert response.status == ToolResponseStatus.SUCCESS
+        assert response.data == "test output"
+        tools.execute_tool.assert_called_once_with(tool_call)
+        logger.log_tool_execution.assert_called_once()
+
+    def test_tool_execution_error():
+        """Test tool execution error handling."""
+        tools = Mock()
+        logger = Mock(spec=ToolLogger)
+        executor = ToolExecutor(tools, logger)
+
+        tool_call = {"name": "test_tool", "parameters": {"param": "value"}}
+        error_msg = "Permission denied"
+        tools.execute_tool.side_effect = Exception(error_msg)
+
+        response = executor.execute_tool(tool_call)
+
+        assert response.status == ToolResponseStatus.ERROR
+        assert error_msg in response.error
+        logger.log_error.assert_called_once()
+
+    def test_tool_execution_validation():
+        """Test tool call validation."""
+        tools = Mock()
+        logger = Mock(spec=ToolLogger)
+        executor = ToolExecutor(tools, logger)
+
+        # Test missing tool name
+        invalid_call = {"parameters": {"param": "value"}}
+        response = executor.execute_tool(invalid_call)
+
+        assert response.status == ToolResponseStatus.ERROR
+        assert "Invalid tool call" in response.error
+        logger.log_error.assert_called_once()
