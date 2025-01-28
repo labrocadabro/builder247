@@ -4,10 +4,21 @@ import pytest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
+from dataclasses import dataclass, field
+from typing import Set
 
 from src.test_management import TestResult, TestManager
-from src.tools.types import ToolResponseStatus
+from src.tools.types import ToolResponse, ToolResponseStatus
 from src.utils.retry import RetryConfig
+from src.acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
+
+
+@dataclass
+class MockCriterionInfo:
+    """Mock criterion info for testing."""
+
+    status: CriteriaStatus
+    test_files: Set[str] = field(default_factory=set)
 
 
 def test_test_result_initialization():
@@ -66,7 +77,7 @@ def mock_logger():
 @pytest.fixture
 def mock_criteria_manager():
     """Create mock criteria manager."""
-    return Mock()
+    return Mock(spec=AcceptanceCriteriaManager)
 
 
 @pytest.fixture
@@ -95,29 +106,33 @@ class TestTestManager:
 
     def test_all_tests_pass_true(self, test_manager):
         """Test all_tests_pass when all tests pass."""
-        test_manager.get_test_results = Mock(
-            return_value={"test1.py": "passed", "test2.py": "passed"}
+        test_manager.tools.run_command = Mock(
+            return_value=ToolResponse(status=ToolResponseStatus.SUCCESS)
         )
 
         assert test_manager.all_tests_pass() is True
 
     def test_all_tests_pass_false(self, test_manager):
         """Test all_tests_pass when some tests fail."""
-        test_manager.get_test_results = Mock(
-            return_value={"test1.py": "passed", "test2.py": "failed"}
+        test_manager.tools.run_command = Mock(
+            return_value=ToolResponse(status=ToolResponseStatus.ERROR)
         )
 
         assert test_manager.all_tests_pass() is False
 
     def test_get_failing_tests(self, test_manager):
         """Test getting list of failing tests."""
-        test_manager.get_test_results = Mock(
-            return_value={
-                "test1.py": "passed",
-                "test2.py": "failed",
-                "test3.py": "failed",
-            }
-        )
+        test1_info = MockCriterionInfo(status=CriteriaStatus.VERIFIED)
+        test2_info = MockCriterionInfo(status=CriteriaStatus.FAILED)
+        test2_info.test_files.add("test2.py")
+        test3_info = MockCriterionInfo(status=CriteriaStatus.FAILED)
+        test3_info.test_files.add("test3.py")
+
+        test_manager.criteria_manager.criteria = {
+            "test1": test1_info,
+            "test2": test2_info,
+            "test3": test3_info,
+        }
 
         failing_tests = test_manager.get_failing_tests()
         assert len(failing_tests) == 2
@@ -127,36 +142,78 @@ class TestTestManager:
     @patch("src.test_management.TestManager._record_test_results")
     def test_run_tests_with_retry_success(self, mock_record_results, test_manager):
         """Test successful test execution with retry."""
-        test_manager.tools.execute.return_value.status = ToolResponseStatus.SUCCESS
-        test_manager.tools.execute.return_value.output = "All tests passed"
+        test_manager.tools.run_command = Mock(
+            return_value=ToolResponse(status=ToolResponseStatus.SUCCESS)
+        )
 
         result = test_manager.run_tests_with_retry()
 
         assert result is True
-        mock_record_results.assert_called_once()
+        mock_record_results.assert_not_called()
 
-    @patch("src.test_management.TestManager._record_test_results")
-    def test_run_tests_with_retry_failure(self, mock_record_results, test_manager):
+    def test_run_tests_with_retry_failure(self, test_manager):
         """Test failed test execution with retry."""
-        test_manager.tools.execute.return_value.status = ToolResponseStatus.FAILURE
+        # Create test failure output
+        test_output = "Test failure output"
+        test_results = [
+            {
+                "test_file": "test_example.py",
+                "test_name": "test_function",
+                "status": "failed",
+                "error_message": "Test failed",
+            }
+        ]
+
+        # Mock the run_command to return a failure with output
+        test_manager.tools.run_command = Mock(
+            return_value=ToolResponse(
+                status=ToolResponseStatus.ERROR,
+                data=test_output,
+                error="Test execution failed",
+            )
+        )
+
+        # Mock the test result parsing
+        test_manager.parse_test_results = Mock(return_value=test_results)
+
+        # Mock _record_test_results to track calls
+        test_manager._record_test_results = Mock()
 
         result = test_manager.run_tests_with_retry()
 
         assert result is False
-        mock_record_results.assert_not_called()
+        test_manager.parse_test_results.assert_called_once_with(test_output)
+        test_manager._record_test_results.assert_called_once_with(
+            test_results, test_manager._recent_changes, None, None
+        )
 
     def test_track_file_change(self, test_manager):
         """Test tracking modified files."""
         test_manager.track_file_change("src/example.py")
-        assert "src/example.py" in test_manager.modified_files
+        assert "src/example.py" in test_manager._recent_changes
 
     def test_get_test_files(self, test_manager):
         """Test getting list of test files."""
-        test_manager.tools.execute.return_value.status = ToolResponseStatus.SUCCESS
-        test_manager.tools.execute.return_value.output = "test1.py\ntest2.py"
+        # Create mock test files
+        test_files = [Mock(spec=Path), Mock(spec=Path)]
 
-        test_files = test_manager.get_test_files()
+        # Set up the mock files
+        test_files[0].is_file.return_value = True
+        test_files[0].name = "test_example1.py"
+        test_files[1].is_file.return_value = True
+        test_files[1].name = "test_example2.py"
 
-        assert len(test_files) == 2
-        assert "test1.py" in test_files
-        assert "test2.py" in test_files
+        # Mock the workspace_dir's glob method
+        mock_workspace = Mock(spec=Path)
+        mock_workspace.glob.return_value = test_files
+        test_manager.workspace_dir = mock_workspace
+
+        result = test_manager.get_test_files()
+
+        # Verify the results
+        assert len(result) == 2
+        assert "test_example1.py" in result
+        assert "test_example2.py" in result
+
+        # Verify the glob pattern was correct
+        mock_workspace.glob.assert_called_once_with("**/*.py")

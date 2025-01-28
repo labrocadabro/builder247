@@ -78,7 +78,7 @@ class TestManager:
             if result.status != ToolResponseStatus.SUCCESS:
                 if self.parse_test_results:
                     # Parse test output using provided callback
-                    test_results = self.parse_test_results(result.output)
+                    test_results = self.parse_test_results(result.data)
                     self._record_test_results(
                         test_results, self._recent_changes, commit_id, commit_message
                     )

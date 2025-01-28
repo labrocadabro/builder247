@@ -1,7 +1,7 @@
 """Unit tests for phase management functionality."""
 
 import pytest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.phase_management import (
     ImplementationPhase,
@@ -49,9 +49,20 @@ class TestPhaseManager:
         return Mock(spec=ToolLogger)
 
     @pytest.fixture
-    def phase_manager(self, mock_tools, mock_logger):
+    def mock_execute_phase(self):
+        """Create mock execute phase callback."""
+        return Mock(return_value=("Success", [{"name": "test_tool", "parameters": {}}]))
+
+    @pytest.fixture
+    def phase_manager(self, mock_tools, mock_logger, mock_execute_phase):
         """Create PhaseManager instance with mocked dependencies."""
-        return PhaseManager(tools=mock_tools, logger=mock_logger)
+        with patch("src.phase_management.ToolExecutor") as mock_executor_class:
+            manager = PhaseManager(
+                tools=mock_tools, logger=mock_logger, execute_phase=mock_execute_phase
+            )
+            # Store the mock executor for test access
+            manager._mock_executor = mock_executor_class.return_value
+            return manager
 
     def test_initialization(self, phase_manager, mock_tools, mock_logger):
         """Test PhaseManager initialization."""
@@ -59,54 +70,70 @@ class TestPhaseManager:
         assert phase_manager.logger == mock_logger
         assert phase_manager.max_retries == 3
 
-    def test_run_phase_with_recovery_success(self, phase_manager):
+    def test_run_phase_with_recovery_success(self, phase_manager, mock_execute_phase):
         """Test successful phase execution."""
         phase_state = PhaseState(phase=ImplementationPhase.ANALYSIS)
-        context = {"test": "data"}
+        context = {"todo": "Test task", "criteria": ["Test criteria"]}
 
-        # Mock successful execution
-        phase_manager._execute_tools = Mock(return_value={"status": "success"})
+        # Set up the mock executor to return success
+        phase_manager._execute_tools = Mock(
+            return_value={
+                "files_modified": ["test.py"],
+                "test_files_added": [],
+                "fixes_applied": [],
+                "commit_message": None,
+                "criteria": ["Test criteria"],
+            }
+        )
+
+        # Mock validation to return success
         phase_manager._validate_phase = Mock(return_value={"status": "success"})
+
+        # Mock the execute_phase callback
+        mock_execute_phase.return_value = (
+            "Success",
+            [{"name": "test_tool", "parameters": {}}],
+        )
 
         result = phase_manager.run_phase_with_recovery(phase_state, context)
 
         assert result == {"status": "success"}
-        assert phase_state.attempts == 1
-        assert phase_state.last_error is None
+        assert phase_state.attempts == 0
+        mock_execute_phase.assert_called_once_with(context, phase_state.phase)
 
-    def test_run_phase_with_recovery_failure(self, phase_manager):
+    def test_run_phase_with_recovery_failure(self, phase_manager, mock_execute_phase):
         """Test phase execution with failure and retry."""
         phase_state = PhaseState(phase=ImplementationPhase.ANALYSIS)
-        context = {"test": "data"}
+        context = {"todo": "Test task", "criteria": ["Test criteria"]}
 
         # Mock failed execution
-        phase_manager._execute_tools = Mock(return_value=None)
+        phase_manager._mock_executor.execute_tools.return_value = None
 
         result = phase_manager.run_phase_with_recovery(phase_state, context)
 
         assert result is None
-        assert phase_state.attempts == 1
-        assert phase_state.last_error is not None
+        assert phase_state.attempts == phase_manager.max_retries
+        assert phase_state.last_error == "Tool execution failed"
 
     def test_execute_tool_safely(self, phase_manager):
         """Test safe tool execution."""
         tool_call = {"name": "test_tool", "parameters": {"param": "value"}}
 
         # Mock successful tool execution
-        phase_manager.tools.execute = Mock(
+        phase_manager.tools.execute_tool = Mock(
             return_value=ToolResponse(
-                status=ToolResponseStatus.SUCCESS, output="test output"
+                status=ToolResponseStatus.SUCCESS, data="test output"
             )
         )
 
         response = phase_manager._execute_tool_safely(tool_call)
 
         assert response.status == ToolResponseStatus.SUCCESS
-        assert response.output == "test output"
+        assert response.data == "test output"
 
     def test_create_message_with_context(self, phase_manager):
         """Test message creation with context."""
-        context = {"test": "data"}
+        context = {"todo": "Test task", "criteria": ["Test criteria"]}
         phase_state = PhaseState(
             phase=ImplementationPhase.ANALYSIS, last_feedback="Previous feedback"
         )
@@ -115,3 +142,5 @@ class TestPhaseManager:
 
         assert isinstance(message, str)
         assert "Previous feedback" in message
+        assert "Test task" in message
+        assert "Test criteria" in message
