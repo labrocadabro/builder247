@@ -4,8 +4,8 @@ Core retry functionality for error recovery.
 
 import logging
 import time
-from dataclasses import dataclass
-from typing import Optional, Callable, Type, List, TypeVar, Any
+from dataclasses import dataclass, field
+from typing import Optional, Callable, Type, List, TypeVar
 
 from tests.unit.tools.types import ToolResponse, ToolResponseStatus
 
@@ -18,11 +18,7 @@ class RetryConfig:
 
     max_attempts: int = 3
     delay_seconds: float = 1.0
-    retry_on: List[Type[Exception]] = None
-
-    def __post_init__(self):
-        if self.retry_on is None:
-            self.retry_on = [Exception]
+    retry_on: List[Type[Exception]] = field(default_factory=lambda: [Exception])
 
 
 def with_retry(
@@ -59,7 +55,7 @@ def with_retry(
     logger = logger or logging.getLogger(__name__)
 
     last_error = None
-    last_result = None
+    error_msg = None
 
     for attempt in range(config.max_attempts):
         try:
@@ -67,30 +63,30 @@ def with_retry(
 
             # Handle ToolResponse specially
             if isinstance(result, ToolResponse):
-                if result.status != ToolResponseStatus.ERROR:
+                if result.status == ToolResponseStatus.SUCCESS:
                     return result
-                last_result = result
-                error = result.error
-            else:
-                return result
+                # Convert failed ToolResponse to exception to maintain consistent error handling
+                error_msg = f"Tool execution failed: {result.error}"
+                raise RuntimeError(error_msg)
+            return result
 
         except Exception as e:
             if not any(isinstance(e, err_type) for err_type in config.retry_on):
                 raise
-            error = str(e)
+            error_msg = str(e)
             last_error = e
 
-        # If this was the last attempt, raise or return the error
+        # If this was the last attempt, raise the last error
         if attempt == config.max_attempts - 1:
-            if last_result:
-                return last_result
             if last_error:
                 raise last_error
-            raise RuntimeError(f"Operation failed after {config.max_attempts} attempts")
+            raise RuntimeError(
+                f"Operation failed after {config.max_attempts} attempts: {error_msg}"
+            )
 
         # Log retry attempt
         logger.warning(
-            f"Attempt {attempt + 1}/{config.max_attempts} failed: {error}. "
+            f"Attempt {attempt + 1}/{config.max_attempts} failed: {error_msg}. "
             f"Retrying in {config.delay_seconds}s"
         )
 
