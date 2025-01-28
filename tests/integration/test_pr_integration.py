@@ -15,9 +15,29 @@ from src.tools.git import GitTools
 from tests.utils.mock_tools import MockSecurityContext
 
 
+# Test repository configuration
+TEST_REPO_OWNER = os.getenv("TEST_REPO_OWNER", "builder247-test")
+TEST_REPO_NAME = os.getenv("TEST_REPO_NAME", "integration-test-repo")
+TEST_REPO_URL = f"https://github.com/{TEST_REPO_OWNER}/{TEST_REPO_NAME}.git"
+GITHUB_USERNAME = os.getenv("GITHUB_USERNAME")  # Must be the owner of the GitHub PAT
+if not GITHUB_USERNAME:
+    raise ValueError(
+        "GITHUB_USERNAME environment variable must be set to your GitHub username (owner of the PAT)"
+    )
+FORK_URL = f"https://github.com/{GITHUB_USERNAME}/{TEST_REPO_NAME}.git"
+
+
 @pytest.mark.skipif(
-    "GITHUB_TOKEN" not in os.environ or "ANTHROPIC_API_KEY" not in os.environ,
-    reason="GitHub token and Anthropic API key required for PR integration tests",
+    not all(
+        [
+            "GITHUB_TOKEN" in os.environ,
+            "ANTHROPIC_API_KEY" in os.environ,
+            "TEST_REPO_OWNER" in os.environ,
+            "TEST_REPO_NAME" in os.environ,
+            "GITHUB_USERNAME" in os.environ,
+        ]
+    ),
+    reason="GitHub token, Anthropic API key, and test repository configuration not available for integration tests",
 )
 class TestPRIntegration:
     """Integration tests for PR management."""
@@ -52,11 +72,11 @@ class TestPRIntegration:
             model="claude-3-opus-20240229", history_dir=self.temp_dir / "history"
         )
 
-        # Initialize PR config
+        # Initialize PR config with test repository
         self.pr_config = PRConfig(
             workspace_dir=self.temp_dir,
-            upstream_url="https://github.com/test/repo.git",
-            fork_url="https://github.com/test-fork/repo.git",
+            upstream_url=TEST_REPO_URL,
+            fork_url=FORK_URL,
         )
 
         # Initialize PR manager
@@ -68,10 +88,26 @@ class TestPRIntegration:
             phase_manager=self.phase_manager,
         )
 
+        # Set up test branch name
+        self.test_branch = (
+            f"test-pr-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        )
+
         yield
 
         # Cleanup
-        self.security_context.cleanup()
+        try:
+            # Clean up test branch if it exists
+            if self.git_tools.branch_exists(self.test_branch):
+                self.git_tools.delete_branch(self.test_branch)
+
+            # Clean up any open PRs created during tests
+            prs = self.git_tools.list_pull_requests()
+            for pr in prs:
+                if pr["head"]["ref"].startswith("test-pr-"):
+                    self.git_tools.close_pull_request(pr["number"])
+        finally:
+            self.security_context.cleanup()
 
     def test_pr_creation_flow(self):
         """Test complete PR creation flow."""
@@ -86,9 +122,8 @@ class TestPRIntegration:
         self.git_tools.commit("Initial commit")
 
         # Create branch
-        branch_name = f"feature-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        self.git_tools.create_branch(branch_name)
-        self.git_tools.checkout_branch(branch_name)
+        self.git_tools.create_branch(self.test_branch)
+        self.git_tools.checkout_branch(self.test_branch)
 
         # Make changes
         test_file.write_text("print('updated test')")
@@ -104,12 +139,20 @@ class TestPRIntegration:
         # Verify PR creation
         prs = self.git_tools.list_pull_requests()
         assert len(prs) > 0
-        assert any(pr["title"] == "Update test implementation" for pr in prs)
+        assert any(
+            pr["title"] == "Update test implementation"
+            and pr["head"]["ref"] == self.test_branch
+            for pr in prs
+        )
 
     def test_pr_review_feedback(self):
         """Test handling PR review feedback."""
         # Set up test repository
         self.git_tools.init_repo()
+
+        # Create branch
+        self.git_tools.create_branch(self.test_branch)
+        self.git_tools.checkout_branch(self.test_branch)
 
         # Create initial PR
         test_file = self.temp_dir / "test.py"
@@ -158,8 +201,8 @@ except Exception as e:
         self.git_tools.commit("Main branch commit")
 
         # Create feature branch
-        self.git_tools.create_branch("feature")
-        self.git_tools.checkout_branch("feature")
+        self.git_tools.create_branch(self.test_branch)
+        self.git_tools.checkout_branch(self.test_branch)
 
         # Make conflicting changes
         test_file.write_text("print('feature branch')")
@@ -181,6 +224,10 @@ except Exception as e:
         # Set up test repository
         self.git_tools.init_repo()
 
+        # Create branch for valid PR test
+        self.git_tools.create_branch(self.test_branch)
+        self.git_tools.checkout_branch(self.test_branch)
+
         # Test invalid PR title
         with pytest.raises(ValueError, match="PR title cannot be empty"):
             self.pr_manager.finalize_changes("", ["Test criterion"])
@@ -190,8 +237,9 @@ except Exception as e:
             self.pr_manager.finalize_changes("Test PR", [])
 
         # Test invalid branch name
-        self.git_tools.create_branch("invalid/branch")
-        self.git_tools.checkout_branch("invalid/branch")
+        invalid_branch = "invalid/branch"
+        self.git_tools.create_branch(invalid_branch)
+        self.git_tools.checkout_branch(invalid_branch)
 
         test_file = self.temp_dir / "test.py"
         test_file.write_text("print('test')")

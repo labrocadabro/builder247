@@ -10,9 +10,21 @@ from src.tools.types import ToolResponseStatus
 from tests.utils.mock_tools import MockSecurityContext
 
 
+# Test repository configuration
+TEST_REPO_OWNER = os.getenv("TEST_REPO_OWNER", "builder247-test")
+TEST_REPO_NAME = os.getenv("TEST_REPO_NAME", "integration-test-repo")
+TEST_REPO_URL = f"https://github.com/{TEST_REPO_OWNER}/{TEST_REPO_NAME}.git"
+
+
 @pytest.mark.skipif(
-    "GITHUB_TOKEN" not in os.environ,
-    reason="GitHub token not available for integration tests",
+    not all(
+        [
+            "GITHUB_TOKEN" in os.environ,
+            "TEST_REPO_OWNER" in os.environ,
+            "TEST_REPO_NAME" in os.environ,
+        ]
+    ),
+    reason="GitHub token and test repository configuration not available for integration tests",
 )
 class TestGitIntegration:
     """Integration tests for Git automation tools."""
@@ -31,10 +43,23 @@ class TestGitIntegration:
             workspace_dir=self.temp_dir, security_context=self.security_context
         )
 
+        # Set up test repository configuration
+        self.ORIGINAL_OWNER = TEST_REPO_OWNER
+        self.REPO_NAME = TEST_REPO_NAME
+        self.REPO_URL = TEST_REPO_URL
+        self.TEST_BRANCH = f"test-branch-{os.getpid()}"
+        self.TEST_FILE = "test-file.txt"
+        self.TEST_COMMIT_MSG = "Test commit message"
+
         yield
 
         # Cleanup
-        self.security_context.cleanup()
+        try:
+            # Clean up test branch if it exists
+            if self.git_tools.branch_exists(self.TEST_BRANCH):
+                self.git_tools.delete_branch(self.TEST_BRANCH)
+        finally:
+            self.security_context.cleanup()
 
     def test_git_operations(self):
         """Test basic git operations."""
