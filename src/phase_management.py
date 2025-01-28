@@ -61,14 +61,12 @@ class PhaseManager:
         self,
         phase_state: PhaseState,
         context: Dict,
-        validator: Callable[[Dict], Optional[Dict]],
     ) -> Optional[Dict]:
         """Run a phase with state tracking and recovery.
 
         Args:
             phase_state: Current phase state
             context: Implementation context
-            validator: Function to validate phase results
 
         Returns:
             Phase results if successful, None otherwise
@@ -105,8 +103,8 @@ class PhaseManager:
                 # Add criteria to results for validation
                 results["criteria"] = context["criteria"]
 
-                # Validate phase completion
-                results = validator(results)
+                # Validate phase completion based on phase type
+                results = self._validate_phase(phase_state.phase, results)
                 if results:
                     return results
 
@@ -382,3 +380,44 @@ class PhaseManager:
             self.criteria_manager.update_criterion_status(
                 criterion, CriteriaStatus.FAILED, error_msg
             )
+
+    def _validate_phase(
+        self, phase: ImplementationPhase, results: Dict
+    ) -> Optional[Dict]:
+        """Validate phase results based on phase type.
+
+        Args:
+            phase: Current implementation phase
+            results: Phase execution results
+
+        Returns:
+            Validated results if successful, None otherwise
+        """
+        if phase == ImplementationPhase.ANALYSIS:
+            # Analysis phase should produce planned changes
+            if not results.get("planned_changes"):
+                return None
+            for change in results["planned_changes"]:
+                if not change.get("description"):
+                    return None
+            return results
+
+        elif phase == ImplementationPhase.IMPLEMENTATION:
+            # Implementation phase should modify files
+            if not results.get("files_modified"):
+                return None
+            return results
+
+        elif phase == ImplementationPhase.TESTING:
+            # Testing phase should add test files
+            if not results.get("test_files_added"):
+                return None
+            return results
+
+        elif phase == ImplementationPhase.FIXES:
+            # Fixes phase should apply fixes
+            if not results.get("fixes_applied"):
+                return None
+            return results
+
+        return results  # Unknown phase type

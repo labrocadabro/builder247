@@ -117,14 +117,17 @@ class ImplementationAgent:
                 return False
 
             # Initialize context and state
-            context = self._initialize_context(todo_item, acceptance_criteria)
+            context = {
+                "todo": todo_item,
+                "criteria": acceptance_criteria,
+                "workspace_dir": str(self.config.workspace_dir),
+            }
             phase_state = PhaseState(phase=ImplementationPhase.ANALYSIS)
 
             # 1. Analysis Phase
             results = self.phase_manager.run_phase_with_recovery(
                 phase_state,
                 context,
-                self._validate_analysis,
             )
             if not results:
                 return False
@@ -139,7 +142,6 @@ class ImplementationAgent:
                 success = self.phase_manager.run_phase_with_recovery(
                     phase_state,
                     context,
-                    self._validate_implementation,
                 )
                 if not success:
                     return False
@@ -157,7 +159,6 @@ class ImplementationAgent:
                 success = self.phase_manager.run_phase_with_recovery(
                     phase_state,
                     {**context, "current_criterion": criterion},
-                    self._validate_tests,
                 )
                 if not success:
                     return False
@@ -173,7 +174,6 @@ class ImplementationAgent:
                 success = self.phase_manager.run_phase_with_recovery(
                     phase_state,
                     {**context, "test_results": self.test_manager.get_test_results()},
-                    self._validate_fixes,
                 )
                 if not success:
                     return False

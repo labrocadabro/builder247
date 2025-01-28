@@ -9,7 +9,7 @@ from .tools import ToolImplementations
 from .tools.types import ToolResponseStatus
 from .utils.monitoring import ToolLogger
 from .utils.retry import RetryConfig
-from .acceptance_criteria import CriteriaManager, CriteriaStatus
+from .acceptance_criteria import AcceptanceCriteriaManager, CriteriaStatus
 
 
 @dataclass
@@ -38,7 +38,7 @@ class TestManager:
         workspace_dir: Path,
         tools: ToolImplementations,
         logger: ToolLogger,
-        criteria_manager: CriteriaManager,
+        criteria_manager: AcceptanceCriteriaManager,
         retry_config: RetryConfig = None,
         parse_test_results: Optional[Callable[[str], List[Dict]]] = None,
     ):
