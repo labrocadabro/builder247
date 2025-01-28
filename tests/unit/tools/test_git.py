@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 import requests
+import subprocess
 
 from src.tools.git import GitTools
 from src.tools.types import ToolResponseStatus
@@ -364,3 +365,34 @@ def test_create_merge_commit_failure(mock_repo, git_tools):
     assert response.status == ToolResponseStatus.ERROR
     assert "Commit failed" in response.error
     assert response.metadata["error_type"] == "Exception"
+
+
+def test_can_access_repository(git_tools):
+    """Test repository accessibility checking."""
+    # Test accessible repository
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        assert (
+            git_tools.can_access_repository("https://github.com/valid/repo.git") is True
+        )
+        mock_run.assert_called_with(
+            ["git", "ls-remote", "https://github.com/valid/repo.git"],
+            capture_output=True,
+            text=True,
+            cwd=str(git_tools.workspace_dir),
+        )
+
+    # Test inaccessible repository
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 128  # Git error code
+        assert (
+            git_tools.can_access_repository("https://github.com/invalid/repo.git")
+            is False
+        )
+
+    # Test exception handling
+    with patch("subprocess.run", side_effect=Exception("Connection failed")):
+        assert (
+            git_tools.can_access_repository("https://github.com/error/repo.git")
+            is False
+        )

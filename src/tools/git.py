@@ -1,13 +1,11 @@
 """Git tools for repository management."""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Union
-from git import GitCommandError, InvalidGitRepositoryError, Repo
-import requests
+from typing import Optional
+from git import GitCommandError, Repo
 import re
-
-from git.objects import Commit
-from git.refs import Head
+import requests
+import subprocess
 
 from .types import ToolResponse, ToolResponseStatus
 from ..utils.retry import with_retry, RetryConfig
@@ -56,6 +54,28 @@ class GitTools:
 
         self.logger = ToolLogger()
         self.repo = None
+
+    def can_access_repository(self, repo_url: str) -> bool:
+        """Check if a git repository is accessible.
+
+        Args:
+            repo_url: URL of the repository to check
+
+        Returns:
+            bool: True if repository can be accessed, False otherwise
+        """
+        try:
+            # Try to do a test clone with --no-checkout to avoid downloading files
+            # This is faster than a full clone and still verifies access
+            result = subprocess.run(
+                ["git", "ls-remote", repo_url],
+                capture_output=True,
+                text=True,
+                cwd=str(self.workspace_dir),
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def check_fork_exists(self, owner: str, repo_name: str) -> ToolResponse:
         """Check if fork exists using GitHub API.

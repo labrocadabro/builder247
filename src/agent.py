@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime
 
 from .client import AnthropicClient
 from .tools import ToolImplementations
@@ -15,7 +16,7 @@ from .test_management import TestManager
 from .tools.filesystem import register_filesystem_tools
 from .tools.command import register_command_tools
 from .tools.git import register_git_tools, GitTools
-from .pr_management import PRManager
+from .pr_management import PRManager, PRConfig
 from .phase_management import PhaseManager, PhaseState, ImplementationPhase
 
 
@@ -41,18 +42,30 @@ class ImplementationAgent:
     """AI agent for implementing todo items."""
 
     def __init__(self, config: AgentConfig):
-        """Initialize agent.
+        """Initialize the implementation agent.
 
         Args:
             config: Agent configuration
+
+        Raises:
+            ValueError: If workspace directory does not exist or configuration is invalid
         """
+        # Validate workspace directory
+        if not config.workspace_dir.exists():
+            raise ValueError(
+                f"Workspace directory {config.workspace_dir} does not exist"
+            )
+
         self.config = config
-        self.logger = ToolLogger(config.log_file) if config.log_file else ToolLogger()
+        self.logger = ToolLogger()
+
+        # Convert allowed paths to strings for consistent comparison
+        allowed_paths = [str(p) for p in (config.allowed_paths or [])]
 
         # Initialize tools with security settings
         self.tools = ToolImplementations(
             workspace_dir=config.workspace_dir,
-            allowed_paths=config.allowed_paths,
+            allowed_paths=allowed_paths,
             allowed_env_vars=config.allowed_env_vars,
             restricted_commands=config.restricted_commands,
         )
@@ -61,6 +74,38 @@ class ImplementationAgent:
         register_filesystem_tools(self.tools)
         register_command_tools(self.tools)
         register_git_tools(self.tools)
+
+        # Initialize git tools with workspace directory and security context
+        self.git_tools = GitTools(config.workspace_dir, self.tools.security_context)
+
+        # Validate repository URLs by attempting to access them
+        if config.upstream_url:
+            if not self.git_tools.can_access_repository(config.upstream_url):
+                raise ValueError(
+                    f"Cannot access upstream repository: {config.upstream_url}"
+                )
+        if config.fork_url:
+            if not self.git_tools.can_access_repository(config.fork_url):
+                raise ValueError(f"Cannot access fork repository: {config.fork_url}")
+
+        # Initialize retry config
+        self.retry_config = RetryConfig(max_attempts=config.max_retries)
+
+        # Initialize criteria manager first since it's needed by test manager
+        self.criteria_manager = AcceptanceCriteriaManager(config.workspace_dir)
+
+        # Initialize phase manager first since it's needed by PR manager
+        self.phase_manager = PhaseManager(self.tools, self.git_tools, self.logger)
+
+        # Initialize test manager with dependencies
+        self.test_manager = TestManager(
+            workspace_dir=config.workspace_dir,
+            tools=self.tools,
+            logger=self.logger,
+            criteria_manager=self.criteria_manager,
+            retry_config=self.retry_config,
+            parse_test_results=self._parse_test_results,
+        )
 
         # Initialize client for AI interactions
         api_key = config.api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -76,31 +121,18 @@ class ImplementationAgent:
             history_dir=config.history_dir,
         )
 
-        self.retry_config = RetryConfig(max_attempts=config.max_retries)
-
-        # Initialize managers
-        self.criteria_manager = AcceptanceCriteriaManager(config.workspace_dir)
-        self.git_tools = GitTools(self.tools, self.logger)
-        self.pr_manager = PRManager(
-            self.tools, self.logger, config.upstream_url, config.fork_url
-        )
-
-        # Initialize test manager with callback
-        self.test_manager = TestManager(
+        # Initialize PR manager with dependencies
+        pr_config = PRConfig(
             workspace_dir=config.workspace_dir,
-            tools=self.tools,
-            logger=self.logger,
-            criteria_manager=self.criteria_manager,
-            retry_config=self.retry_config,
-            parse_test_results=self._parse_test_results,
+            upstream_url=config.upstream_url or "",
+            fork_url=config.fork_url or "",
         )
-
-        # Initialize phase manager with callback
-        self.phase_manager = PhaseManager(
+        self.pr_manager = PRManager(
+            config=pr_config,
+            client=self.client,
             tools=self.tools,
             logger=self.logger,
-            max_retries=config.max_retries,
-            execute_phase=self._execute_phase,
+            phase_manager=self.phase_manager,
         )
 
     def implement_todo(self, todo_item: str, acceptance_criteria: List[str]) -> bool:
@@ -122,14 +154,11 @@ class ImplementationAgent:
                 "criteria": acceptance_criteria,
                 "workspace_dir": str(self.config.workspace_dir),
             }
-            phase_state = PhaseState(phase=ImplementationPhase.ANALYSIS)
 
             # 1. Analysis Phase
-            results = self.phase_manager.run_phase_with_recovery(
-                phase_state,
-                context,
-            )
-            if not results:
+            phase_state = PhaseState(phase=ImplementationPhase.ANALYSIS)
+            results = self.phase_manager.run_phase_with_recovery(phase_state, context)
+            if not results or not results.get("success"):
                 return False
 
             # Update context with planned changes
@@ -139,11 +168,10 @@ class ImplementationAgent:
             phase_state = PhaseState(phase=ImplementationPhase.IMPLEMENTATION)
             for change in context["planned_changes"]:
                 context["current_change"] = change
-                success = self.phase_manager.run_phase_with_recovery(
-                    phase_state,
-                    context,
+                results = self.phase_manager.run_phase_with_recovery(
+                    phase_state, context
                 )
-                if not success:
+                if not results or not results.get("success"):
                     return False
 
                 # Commit changes after successful implementation
@@ -151,34 +179,27 @@ class ImplementationAgent:
                     f"Implement: {change.get('description', 'changes')}"
                 )
 
-            # Update phase state for testing
-            phase_state = PhaseState(phase=ImplementationPhase.TESTING)
-
             # 3. Testing Phase
+            phase_state = PhaseState(phase=ImplementationPhase.TESTING)
             for criterion in acceptance_criteria:
-                success = self.phase_manager.run_phase_with_recovery(
+                results = self.phase_manager.run_phase_with_recovery(
                     phase_state,
                     {**context, "current_criterion": criterion},
                 )
-                if not success:
+                if not results or not results.get("success"):
                     return False
 
                 # Commit test files
                 self.git_tools.commit_changes(f"Add tests for: {criterion}")
 
-            # Update phase state for fixes
-            phase_state = PhaseState(phase=ImplementationPhase.FIXES)
-
             # 4. Fixes Phase (repeat until all tests pass)
+            phase_state = PhaseState(phase=ImplementationPhase.FIXES)
             while not self.test_manager.all_tests_pass():
-                success = self.phase_manager.run_phase_with_recovery(
+                results = self.phase_manager.run_phase_with_recovery(
                     phase_state,
                     {**context, "test_results": self.test_manager.get_test_results()},
                 )
-                if not success:
-                    return False
-                phase_state.attempts += 1
-                if phase_state.attempts > self.config.max_retries:
+                if not results or not results.get("success"):
                     self._handle_max_retries_exceeded(context["criteria"])
                     return False
 
@@ -188,6 +209,10 @@ class ImplementationAgent:
             # All tests pass - sync and create PR
             if not self.pr_manager.finalize_changes(todo_item, acceptance_criteria):
                 return False
+
+            # Write history file if directory is configured
+            if self.config.history_dir:
+                self._write_history_file(todo_item, context)
 
             return True
 
@@ -381,3 +406,35 @@ Test output:
                 CriteriaStatus.FAILED,
                 "Max retries exceeded while implementing changes",
             )
+
+    def _write_history_file(self, todo_item: str, context: Dict) -> None:
+        """Write implementation history to file.
+
+        Args:
+            todo_item: The todo item being implemented
+            context: Implementation context
+        """
+        try:
+            if not self.config.history_dir.exists():
+                self.config.history_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().isoformat()
+            history_file = self.config.history_dir / f"history_{timestamp}.json"
+
+            history_data = {
+                "timestamp": timestamp,
+                "todo": todo_item,
+                "changes": [
+                    {
+                        "description": change.get("description", "Unknown change"),
+                        "criterion": change.get("criterion", "Unknown criterion"),
+                    }
+                    for change in context.get("planned_changes", [])
+                ],
+            }
+
+            with open(history_file, "w") as f:
+                json.dump(history_data, f, indent=2)
+
+        except Exception as e:
+            self.logger.log_error("write_history_file", str(e))
