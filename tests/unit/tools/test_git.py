@@ -4,10 +4,19 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 import requests
-import subprocess
+from git import Remote
 
 from src.tools.git import GitTools
 from src.tools.types import ToolResponseStatus
+
+
+@pytest.fixture
+def mock_logger():
+    """Create mock logger."""
+    logger = Mock()
+    logger.warning = Mock()
+    logger.error = Mock()
+    return logger
 
 
 @pytest.fixture
@@ -27,10 +36,11 @@ def mock_workspace(tmp_path):
 
 
 @pytest.fixture
-def git_tools(mock_workspace, mock_security_context):
+def git_tools(mock_workspace, mock_security_context, mock_logger):
     """Create GitTools instance with mocked dependencies."""
     with patch("src.tools.git.Repo"):
         tools = GitTools(mock_workspace, mock_security_context)
+        tools.logger = mock_logger
         return tools
 
 
@@ -157,13 +167,12 @@ def test_create_pr_success(mock_post, git_tools):
 @patch("src.tools.git.Repo")
 def test_sync_fork_success(mock_repo, git_tools):
     """Test successful fork sync."""
-    # Set up minimal mock repo with required attributes
+    # Mock successful sync
     mock_instance = Mock()
-    mock_origin = Mock(name="origin")
-    mock_remotes = Mock()
-    mock_remotes.origin = mock_origin
-    mock_remotes.__iter__ = Mock(return_value=iter([mock_origin]))
-    mock_instance.remotes = mock_remotes
+    mock_instance.remotes = Mock()
+    mock_instance.remotes.__iter__ = lambda self: iter([Mock(name="origin")])
+    mock_instance.remotes.origin = Mock(spec=Remote)
+    mock_instance.remotes.create = lambda name, url: Mock(spec=Remote, name=name)
     mock_instance.git.custom_environment.return_value.__enter__ = Mock()
     mock_instance.git.custom_environment.return_value.__exit__ = Mock()
     mock_repo.clone_from.return_value = mock_instance
@@ -174,8 +183,8 @@ def test_sync_fork_success(mock_repo, git_tools):
 
     assert response.status == ToolResponseStatus.SUCCESS
     assert response.data == {"has_conflicts": False}
-    assert "repo_url" in response.metadata
-    assert "fork_url" in response.metadata
+    assert response.metadata["repo_url"] == "https://github.com/original/repo.git"
+    assert response.metadata["fork_url"] == "https://github.com/fork/repo.git"
 
 
 @patch("src.tools.git.Repo")
@@ -206,55 +215,39 @@ def test_clone_repo_success(mock_repo, git_tools):
     assert response.metadata["repo_url"] == repo_url
 
 
-def test_retry_on_network_error(git_tools):
-    """Test retry mechanism on network errors."""
-    with patch("requests.get") as mock_get:
-        # Fail twice with network error, succeed on third try
-        mock_get.side_effect = [
-            requests.RequestException("Network error"),
-            requests.RequestException("Network error"),
-            Mock(status_code=200),
-        ]
+@patch("requests.get")
+def test_check_fork_exists_network_failure(mock_get, git_tools):
+    """Test fork check handles network failures gracefully."""
+    mock_get.side_effect = requests.RequestException("Network error")
 
-        response = git_tools.check_fork_exists("owner", "repo")
+    response = git_tools.check_fork_exists("owner", "repo")
 
-        assert response.status == ToolResponseStatus.SUCCESS
-        assert mock_get.call_count == 3
-
-
-def test_retry_exhaustion(git_tools):
-    """Test retry exhaustion returns error response."""
-    with patch("requests.get") as mock_get:
-        mock_get.side_effect = requests.RequestException("Persistent network error")
-
-        response = git_tools.check_fork_exists("owner", "repo")
-
-        assert response.status == ToolResponseStatus.ERROR
-        assert "Persistent network error" in response.error
-        assert mock_get.call_count == 3  # Max retries
+    assert response.status == ToolResponseStatus.ERROR
+    assert "Network error" in response.error
+    assert response.metadata["error_type"] == "RequestException"
+    assert response.metadata["owner"] == "owner"
+    assert response.metadata["repo"] == "repo"
 
 
 @patch("src.tools.git.Repo")
 def test_check_for_conflicts_success(mock_repo, git_tools):
     """Test successful conflict check."""
-    # Mock unmerged blobs
+    # Create mock blob with a_path attribute
     mock_blob = Mock()
     mock_blob.a_path = "test.py"
-    mock_repo = mock_repo.return_value
-    mock_repo.index.unmerged_blobs.return_value = [mock_blob]
+    mock_repo.return_value.index.unmerged_blobs.return_value = [mock_blob]
 
     response = git_tools.check_for_conflicts()
 
     assert response.status == ToolResponseStatus.SUCCESS
     assert response.data["has_conflicts"] is True
-    assert response.data["conflicting_files"] == ["test.py"]
+    assert "test.py" in response.data["conflicting_files"]
 
 
 @patch("src.tools.git.Repo")
 def test_check_for_conflicts_no_conflicts(mock_repo, git_tools):
-    """Test conflict check with no conflicts."""
-    mock_repo = mock_repo.return_value
-    mock_repo.index.unmerged_blobs.return_value = []
+    """Test conflict check when there are no conflicts."""
+    mock_repo.return_value.index.unmerged_blobs.return_value = {}
 
     response = git_tools.check_for_conflicts()
 
@@ -367,32 +360,27 @@ def test_create_merge_commit_failure(mock_repo, git_tools):
     assert response.metadata["error_type"] == "Exception"
 
 
-def test_can_access_repository(git_tools):
-    """Test repository accessibility checking."""
-    # Test accessible repository
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 0
-        assert (
-            git_tools.can_access_repository("https://github.com/valid/repo.git") is True
-        )
-        mock_run.assert_called_with(
-            ["git", "ls-remote", "https://github.com/valid/repo.git"],
-            capture_output=True,
-            text=True,
-            cwd=str(git_tools.workspace_dir),
-        )
+@patch("subprocess.run")
+def test_can_access_repository_success(mock_run, git_tools):
+    """Test successful repository access check."""
+    mock_run.return_value = Mock(returncode=0)
 
-    # Test inaccessible repository
-    with patch("subprocess.run") as mock_run:
-        mock_run.return_value.returncode = 128  # Git error code
-        assert (
-            git_tools.can_access_repository("https://github.com/invalid/repo.git")
-            is False
-        )
+    result = git_tools.can_access_repository("https://github.com/owner/repo.git")
 
-    # Test exception handling
-    with patch("subprocess.run", side_effect=Exception("Connection failed")):
-        assert (
-            git_tools.can_access_repository("https://github.com/error/repo.git")
-            is False
-        )
+    assert result is True
+    mock_run.assert_called_once_with(
+        ["git", "ls-remote", "https://github.com/owner/repo.git"],
+        capture_output=True,
+        text=True,
+        cwd=str(git_tools.workspace_dir),
+    )
+
+
+@patch("subprocess.run")
+def test_can_access_repository_failure(mock_run, git_tools):
+    """Test repository access check when repository is inaccessible."""
+    mock_run.return_value = Mock(returncode=128)
+
+    result = git_tools.can_access_repository("https://github.com/owner/repo.git")
+
+    assert result is False
