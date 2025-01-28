@@ -18,27 +18,17 @@ class ToolImplementations:
         self,
         workspace_dir: Optional[Path] = None,
         allowed_paths: Optional[List[Path]] = None,
-        allowed_env_vars: Optional[List[str]] = None,
-        restricted_commands: Optional[List[str]] = None,
     ) -> None:
         """Initialize ToolImplementations with security context and tools.
 
         Args:
             workspace_dir: Base directory for file operations
             allowed_paths: List of paths that can be accessed
-            allowed_env_vars: List of environment variables that can be accessed
-            restricted_commands: List of commands that are not allowed
         """
         # Initialize security context with provided settings
         self.security_context = SecurityContext()
         self.workspace_dir = workspace_dir or Path.cwd()
         self.allowed_paths = [Path(p) for p in (allowed_paths or [])]
-
-        # Set security constraints
-        if allowed_env_vars is not None:
-            self.security_context.allowed_env_vars = allowed_env_vars
-        if restricted_commands is not None:
-            self.security_context.restricted_commands = restricted_commands
 
         # Initialize empty registry
         self.registered_tools = {}
