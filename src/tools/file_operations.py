@@ -4,6 +4,7 @@ import os
 import shutil
 from typing import Dict, Any
 from pathlib import Path
+from src.tools.execute_command import execute_command
 
 
 def read_file(file_path: str) -> Dict[str, Any]:
@@ -64,13 +65,18 @@ def copy_file(source: str, destination: str) -> Dict[str, Any]:
             - error (str): Error message if unsuccessful
     """
     try:
+        if not os.path.exists(source):
+            return {"success": False, "error": "Source file not found"}
+
+        # Create destination directory if it doesn't exist
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        shutil.copy2(source, destination)
+
+        result = execute_command(f"cp {source} {destination}")
+        if result[2] != 0:
+            raise Exception("Failed to copy file")
         return {"success": True}
-    except FileNotFoundError:
-        return {"success": False, "error": f"Source file not found: {source}"}
     except Exception as e:
-        return {"success": False, "error": f"Error copying file: {str(e)}"}
+        return {"success": False, "error": str(e)}
 
 
 def move_file(source: str, destination: str) -> Dict[str, Any]:
@@ -87,13 +93,18 @@ def move_file(source: str, destination: str) -> Dict[str, Any]:
             - error (str): Error message if unsuccessful
     """
     try:
+        if not os.path.exists(source):
+            return {"success": False, "error": "Source file not found"}
+
+        # Create destination directory if it doesn't exist
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        shutil.move(source, destination)
+
+        result = execute_command(f"mv {source} {destination}")
+        if result[2] != 0:
+            raise Exception("Failed to move file")
         return {"success": True}
-    except FileNotFoundError:
-        return {"success": False, "error": f"Source file not found: {source}"}
     except Exception as e:
-        return {"success": False, "error": f"Error moving file: {str(e)}"}
+        return {"success": False, "error": str(e)}
 
 
 def rename_file(source: str, destination: str) -> Dict[str, Any]:
@@ -132,12 +143,15 @@ def delete_file(file_path: str) -> Dict[str, Any]:
             - error (str): Error message if unsuccessful
     """
     try:
-        os.remove(file_path)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "File not found"}
+
+        result = execute_command(f"rm {file_path}")
+        if result[2] != 0:
+            raise Exception("Failed to delete file")
         return {"success": True}
-    except FileNotFoundError:
-        return {"success": False, "error": f"File not found: {file_path}"}
     except Exception as e:
-        return {"success": False, "error": f"Error deleting file: {str(e)}"}
+        return {"success": False, "error": str(e)}
 
 def list_files(directory: str) -> list:
     """

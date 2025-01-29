@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from github import Github, Auth, GithubException
 from git import Repo
 from dotenv import load_dotenv
@@ -15,6 +15,8 @@ from src.tools.git_operations import (
     push_remote,
 )
 import time
+import subprocess
+import requests
 
 # Load environment variables from .env file
 load_dotenv()
@@ -245,3 +247,87 @@ class GitHubOperations:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": f"Unexpected error: {str(e)}"}
+
+    def can_access_repository(self, repo_url: str) -> bool:
+        """Check if a git repository is accessible."""
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", repo_url],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def check_fork_exists(self, owner: str, repo_name: str) -> Dict[str, Any]:
+        """Check if fork exists using GitHub API."""
+        try:
+            response = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo_name}",
+                headers={"Authorization": f"token {os.environ.get('GITHUB_TOKEN')}"},
+            )
+            if response.status_code != 200:
+                return {"success": False, "error": "Repository not found"}
+            return {"success": True, "exists": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def commit_and_push(self, repo: Repo, message: str, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """Commit and push changes."""
+        try:
+            if file_path:
+                repo.git.add(file_path)
+            else:
+                repo.git.add(A=True)
+            repo.index.commit(message)
+            origin = repo.remotes.origin
+            repo.git.push(origin)
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def check_for_conflicts(self, repo: Repo) -> Dict[str, Any]:
+        """Check if there are merge conflicts."""
+        try:
+            unmerged = [item.a_path for item in repo.index.unmerged_blobs()]
+            return {"success": True, "has_conflicts": bool(unmerged), "conflicting_files": unmerged}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_conflict_info(self, repo: Repo) -> Dict[str, Any]:
+        """Get details about current conflicts."""
+        try:
+            conflicts = {}
+            for item in repo.index.unmerged_blobs():
+                file_path = item.a_path
+                versions = {}
+                for stage, blob in item.entries.items():
+                    if stage == 1:
+                        versions["ancestor"] = blob.data_stream.read().decode()
+                    elif stage == 2:
+                        versions["ours"] = blob.data_stream.read().decode()
+                    elif stage == 3:
+                        versions["theirs"] = blob.data_stream.read().decode()
+                conflicts[file_path] = {"content": versions}
+            return {"success": True, "conflicts": conflicts}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def create_merge_commit(self, repo: Repo, message: str) -> Dict[str, Any]:
+        """Create a merge commit after resolving conflicts."""
+        try:
+            if not repo.index.diff("HEAD"):
+                return {"success": False, "error": "No changes to commit"}
+            commit = repo.index.commit(message)
+            return {"success": True, "commit_id": commit.hexsha}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def clone_repo(self, repo_url: str) -> Dict[str, Any]:
+        """Clone a repository."""
+        try:
+            Repo.clone_from(repo_url, Path.cwd())
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

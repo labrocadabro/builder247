@@ -113,7 +113,7 @@ def test_fork_repository(github_ops, upstream_repo, git_repo):
         git_repo.mkdir()
 
     # Fork the repository
-    fork_result = github_ops.fork_repository(upstream_repo, git_repo)
+    fork_result = github_ops.fork_repository(upstream_repo, git_repo, )
     assert fork_result["success"]
     assert fork_result["fork_url"].endswith(f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}.git")
     assert fork_result["fork_full_name"] == f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}"
