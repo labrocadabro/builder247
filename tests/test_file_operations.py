@@ -1,14 +1,8 @@
 """Tests for file operations module."""
 
 import os
-from src.file_operations import (
-    read_file,
-    write_file,
-    copy_file,
-    move_file,
-    rename_file,
-    delete_file,
-)
+import pytest
+import src.file_operations as fo
 
 
 def test_write_and_read_file(tmp_path):
@@ -17,11 +11,11 @@ def test_write_and_read_file(tmp_path):
     test_content = "Hello, World!"
 
     # Write the file
-    write_result = write_file(str(test_file), test_content)
+    write_result = fo.write_file(str(test_file), test_content)
     assert write_result["success"]
 
     # Read the file
-    read_result = read_file(str(test_file))
+    read_result = fo.read_file(str(test_file))
     assert read_result["success"]
     assert read_result["content"] == test_content
 
@@ -31,11 +25,11 @@ def test_write_file_with_path_creation(tmp_path):
     test_file = tmp_path / "subdir" / "test.txt"
     test_content = "Hello from subdir!"
 
-    write_result = write_file(str(test_file), test_content)
+    write_result = fo.write_file(str(test_file), test_content)
     assert write_result["success"]
     assert os.path.exists(test_file)
 
-    read_result = read_file(str(test_file))
+    read_result = fo.read_file(str(test_file))
     assert read_result["success"]
     assert read_result["content"] == test_content
 
@@ -44,14 +38,14 @@ def test_read_nonexistent_file(tmp_path):
     """Test reading a file that doesn't exist."""
     test_file = tmp_path / "nonexistent.txt"
 
-    result = read_file(str(test_file))
+    result = fo.read_file(str(test_file))
     assert not result["success"]
     assert "File not found" in result["error"]
 
 
 def test_write_file_invalid_path():
     """Test writing to an invalid path."""
-    result = write_file("", "test content")
+    result = fo.write_file("", "test content")
     assert not result["success"]
     assert "Error writing file" in result["error"]
 
@@ -63,15 +57,15 @@ def test_copy_file(tmp_path):
     test_content = "Copy me!"
 
     # Create source file
-    write_result = write_file(str(source), test_content)
+    write_result = fo.write_file(str(source), test_content)
     assert write_result["success"]
 
     # Copy the file
-    copy_result = copy_file(str(source), str(destination))
+    copy_result = fo.copy_file(str(source), str(destination))
     assert copy_result["success"]
 
     # Verify the copy
-    read_result = read_file(str(destination))
+    read_result = fo.read_file(str(destination))
     assert read_result["success"]
     assert read_result["content"] == test_content
 
@@ -83,16 +77,16 @@ def test_move_file(tmp_path):
     test_content = "Move me!"
 
     # Create source file
-    write_result = write_file(str(source), test_content)
+    write_result = fo.write_file(str(source), test_content)
     assert write_result["success"]
 
     # Move the file
-    move_result = move_file(str(source), str(destination))
+    move_result = fo.move_file(str(source), str(destination))
     assert move_result["success"]
 
     # Verify the move
     assert not os.path.exists(source)
-    read_result = read_file(str(destination))
+    read_result = fo.read_file(str(destination))
     assert read_result["success"]
     assert read_result["content"] == test_content
 
@@ -104,16 +98,16 @@ def test_rename_file(tmp_path):
     test_content = "Rename me!"
 
     # Create source file
-    write_result = write_file(str(source), test_content)
+    write_result = fo.write_file(str(source), test_content)
     assert write_result["success"]
 
     # Rename the file
-    rename_result = rename_file(str(source), str(destination))
+    rename_result = fo.rename_file(str(source), str(destination))
     assert rename_result["success"]
 
     # Verify the rename
     assert not os.path.exists(source)
-    read_result = read_file(str(destination))
+    read_result = fo.read_file(str(destination))
     assert read_result["success"]
     assert read_result["content"] == test_content
 
@@ -124,11 +118,11 @@ def test_delete_file(tmp_path):
     test_content = "Delete me!"
 
     # Create file
-    write_result = write_file(str(test_file), test_content)
+    write_result = fo.write_file(str(test_file), test_content)
     assert write_result["success"]
 
     # Delete the file
-    delete_result = delete_file(str(test_file))
+    delete_result = fo.delete_file(str(test_file))
     assert delete_result["success"]
 
     # Verify the deletion
@@ -141,21 +135,61 @@ def test_operations_with_nonexistent_source(tmp_path):
     destination = tmp_path / "destination.txt"
 
     # Try to copy
-    copy_result = copy_file(str(source), str(destination))
+    copy_result = fo.copy_file(str(source), str(destination))
     assert not copy_result["success"]
     assert "Source file not found" in copy_result["error"]
 
     # Try to move
-    move_result = move_file(str(source), str(destination))
+    move_result = fo.move_file(str(source), str(destination))
     assert not move_result["success"]
     assert "Source file not found" in move_result["error"]
 
     # Try to rename
-    rename_result = rename_file(str(source), str(destination))
+    rename_result = fo.rename_file(str(source), str(destination))
     assert not rename_result["success"]
     assert "Source file not found" in rename_result["error"]
 
     # Try to delete
-    delete_result = delete_file(str(source))
+    delete_result = fo.delete_file(str(source))
     assert not delete_result["success"]
-    assert "File not found" in delete_result["error"]
+    assert "File not found" in delete_result["error"]# Replace 'your_module' with the actual module name
+
+def test_list_files_in_directory(tmp_path):
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+
+        # Create files in the temporary directory
+    (tmp_path / "file1.txt").write_text("Content of file 1")
+    (tmp_path / "file2.txt").write_text("Content of file 2")
+    (subdir / "file3.txt").write_text("Content of file 3")
+    (subdir / "file4.txt").write_text("Content of file 4")
+
+    # Call the function with the temporary directory
+    files = fo.list_files(tmp_path)
+
+    print(files)
+
+    # Expected relative paths based on the temp_path
+    expected_files = [
+        "file1.txt",
+        "file2.txt",
+        "subdir/file3.txt",
+        "subdir/file4.txt"
+    ]
+
+    # Check if the returned list matches the expected list
+    assert sorted(files) == sorted(expected_files)
+
+def test_list_files_in_empty_directory(tmp_path):
+    # Create a temporary directory using tempfile
+
+    # Call the function with an empty directory
+    files = fo.list_files(tmp_path)
+
+    # Expect an empty list
+    assert files == []
+
+def test_list_files_in_nonexistent_directory():
+    # Call the function with a nonexistent directory
+    with pytest.raises(FileNotFoundError):
+        fo.list_files("nonexistent_directory")
