@@ -79,17 +79,39 @@ def github_ops():
 
 
 @pytest.fixture
-def git_repo():
-    """Create a temporary directory for Git operations."""
-    # Create a temporary directory
-    temp_dir = tempfile.mkdtemp()
-    yield temp_dir
-    # Clean up
-    shutil.rmtree(temp_dir)
+def git_repo(tmp_path):
+    """Create a temporary Git repository for testing."""
+    # Use pytest's tmp_path fixture
+    temp_dir = tmp_path
+
+    try:
+        # Initialize Git repo
+        repo = Repo.init(temp_dir)
+
+        # Configure Git user for commits
+        repo.config_writer().set_value("user", "name", "Test User").release()
+        repo.config_writer().set_value("user", "email", "test@example.com").release()
+
+        # Create and commit a test file
+        test_file = temp_dir / "test.txt"
+        test_file.write_text("Initial content")
+
+        repo.index.add(["test.txt"])
+        repo.index.commit("Initial commit")
+
+        yield temp_dir  # Return the path instead of the Repo object
+    finally:
+        # Clean up is handled by pytest's tmp_path
+        pass
 
 
 def test_fork_repository(github_ops, upstream_repo, git_repo):
     """Test forking a repository."""
+    # Ensure the directory is empty
+    if any(git_repo.iterdir()):
+        shutil.rmtree(git_repo)
+        git_repo.mkdir()
+
     # Fork the repository
     fork_result = github_ops.fork_repository(upstream_repo, git_repo)
     assert fork_result["success"]
@@ -242,6 +264,11 @@ Testing.
 
 def test_sync_fork(github_ops, upstream_repo, git_repo):
     """Test syncing a fork."""
+    # Ensure the directory is empty
+    if any(git_repo.iterdir()):
+        shutil.rmtree(git_repo)
+        git_repo.mkdir()
+
     # First fork the repository
     fork_result = github_ops.fork_repository(upstream_repo, git_repo)
     assert fork_result["success"]

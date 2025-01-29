@@ -16,10 +16,10 @@ from src.tools.git_operations import (
 
 
 @pytest.fixture
-def git_repo():
+def git_repo(tmp_path):
     """Create a temporary Git repository for testing."""
-    # Create a temporary directory
-    temp_dir = tempfile.mkdtemp()
+    # Use pytest's tmp_path fixture
+    temp_dir = tmp_path
 
     try:
         # Initialize Git repo
@@ -30,7 +30,7 @@ def git_repo():
         repo.config_writer().set_value("user", "email", "test@example.com").release()
 
         # Create and commit a test file
-        test_file = Path(temp_dir) / "test.txt"
+        test_file = temp_dir / "test.txt"
         test_file.write_text("Initial content")
 
         repo.index.add(["test.txt"])
@@ -41,8 +41,8 @@ def git_repo():
 
         yield repo, initial_branch
     finally:
-        # Clean up
-        shutil.rmtree(temp_dir)
+        # Clean up is handled by pytest's tmp_path
+        pass
 
 
 def test_create_and_checkout_branch(git_repo):
