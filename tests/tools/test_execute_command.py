@@ -1,4 +1,5 @@
-from src.execute_command import execute_command
+from src.tools.execute_command import execute_command
+
 from pathlib import Path
 def test_execute_valid_command():
     output, error, return_code = execute_command("echo Hello, World!")
@@ -26,4 +27,10 @@ def test_execute_command_with_special_characters():
     assert return_code == 0
     assert output.strip() == str(Path.home())  # Check if output matches the home directory
 
-# Add more tests as needed for edge cases or specific commands
+def test_execute_sudo_command():
+    # This command should work without requiring a password
+    output, error, return_code = execute_command("sudo echo 'Sudo command executed'")
+
+    assert return_code == 0  # Ensure the command executed successfully
+    assert output.strip() == "Sudo command executed"  # Check the expected output
+    assert error == ""  # Ensure there are no error messages
