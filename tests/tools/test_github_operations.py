@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from pathlib import Path
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from github import Github, Auth
 from git import Repo
 from src.tools.github_operations import GitHubOperations
@@ -308,3 +308,125 @@ def test_resolve_merge_conflicts(github_ops, git_repo):
 
     # Verify the file was updated
     assert conflict_file.read_text() == "Resolved content"
+
+
+def test_get_pr_template(tmp_path):
+    """Test getting PR template."""
+    # Create a mock PR template
+    template_dir = tmp_path / ".github"
+    template_dir.mkdir()
+    template_path = template_dir / "pull_request_template.md"
+    template_content = "# Test PR Template"
+    template_path.write_text(template_content)
+
+    # Change to the temporary directory
+    with patch('pathlib.Path.cwd', return_value=tmp_path):
+        github_ops = GitHubOperations()
+        assert github_ops.get_pr_template() == template_content
+
+
+def test_get_pr_template_not_found(tmp_path):
+    """Test getting PR template when it doesn't exist."""
+    with patch('pathlib.Path.cwd', return_value=tmp_path):
+        github_ops = GitHubOperations()
+        with pytest.raises(FileNotFoundError):
+            github_ops.get_pr_template()
+
+
+def test_sync_fork(github_ops, git_repo):
+    """Test syncing a fork."""
+    repo = Repo(git_repo)
+
+    # Mock the remote operations
+    with patch('src.tools.git_operations.fetch_remote') as mock_fetch, \
+         patch('src.tools.git_operations.pull_remote') as mock_pull, \
+         patch('src.tools.git_operations.push_remote') as mock_push:
+
+        # Set up the mocks
+        mock_fetch.return_value = {"success": True}
+        mock_pull.return_value = {"success": True}
+        mock_push.return_value = {"success": True}
+
+        # Test successful sync
+        result = github_ops.sync_fork(repo)
+        assert result["success"]
+
+        # Verify all operations were called
+        mock_fetch.assert_called_once_with(repo, "upstream")
+        mock_pull.assert_called_once_with(repo, "upstream", "main")
+        mock_push.assert_called_once_with(repo, "origin", "main")
+
+
+def test_sync_fork_failure(github_ops, git_repo):
+    """Test syncing a fork with failures."""
+    repo = Repo(git_repo)
+
+    # Test fetch failure
+    with patch('src.tools.git_operations.fetch_remote') as mock_fetch:
+        mock_fetch.return_value = {"success": False, "error": "Fetch failed"}
+        result = github_ops.sync_fork(repo)
+        assert not result["success"]
+        assert "Fetch failed" in result["error"]
+
+    # Test pull failure
+    with patch('src.tools.git_operations.fetch_remote') as mock_fetch, \
+         patch('src.tools.git_operations.pull_remote') as mock_pull:
+        mock_fetch.return_value = {"success": True}
+        mock_pull.return_value = {"success": False, "error": "Pull failed"}
+        result = github_ops.sync_fork(repo)
+        assert not result["success"]
+        assert "Pull failed" in result["error"]
+
+    # Test push failure
+    with patch('src.tools.git_operations.fetch_remote') as mock_fetch, \
+         patch('src.tools.git_operations.pull_remote') as mock_pull, \
+         patch('src.tools.git_operations.push_remote') as mock_push:
+        mock_fetch.return_value = {"success": True}
+        mock_pull.return_value = {"success": True}
+        mock_push.return_value = {"success": False, "error": "Push failed"}
+        result = github_ops.sync_fork(repo)
+        assert not result["success"]
+        assert "Push failed" in result["error"]
+
+
+def test_check_fork_exists(github_ops):
+    """Test checking if a fork exists."""
+    # Mock successful response
+    with patch('requests.get') as mock_get:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        result = github_ops.check_fork_exists("test-owner", "test-repo")
+        assert result["success"]
+        assert result["exists"]
+
+        # Verify correct URL and headers
+        mock_get.assert_called_once_with(
+            "https://api.github.com/repos/test-owner/test-repo",
+            headers={"Authorization": f"token {github_ops.token}"}
+        )
+
+
+def test_check_fork_not_exists(github_ops):
+    """Test checking if a non-existent fork exists."""
+    # Mock 404 response
+    with patch('requests.get') as mock_get:
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_get.return_value = mock_response
+
+        result = github_ops.check_fork_exists("test-owner", "test-repo")
+        assert not result["success"]
+        assert "Repository not found" in result["error"]
+
+
+def test_check_fork_exists_error(github_ops):
+    """Test error handling in check_fork_exists."""
+    # Mock request exception
+    with patch('requests.get') as mock_get:
+        mock_get.side_effect = Exception("Network error")
+
+        result = github_ops.check_fork_exists("test-owner", "test-repo")
+        assert not result["success"]
+        assert "Network error" in result["error"]

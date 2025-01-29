@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from github import Github, Auth, GithubException
 from git import Repo
 from dotenv import load_dotenv
@@ -13,9 +13,15 @@ from src.tools.git_operations import (
     fetch_remote,
     pull_remote,
     push_remote,
+    can_access_repository,
+    check_for_conflicts,
+    get_conflict_info,
+    create_merge_commit,
+    resolve_conflict,
+    commit_and_push,
 )
+
 import time
-import subprocess
 import requests
 
 # Load environment variables from .env file
@@ -218,116 +224,15 @@ class GitHubOperations:
             print(error_msg)
             return {"success": False, "error": error_msg}
 
-    def resolve_merge_conflicts(
-        self, repo: Repo, file_path: str, content: str, message: str = "Resolve merge conflicts"
-    ) -> Dict[str, Any]:
-        """
-        Resolve merge conflicts in a file.
-
-        Args:
-            repo (Repo): GitPython Repo instance
-            file_path (str): Path to the file with conflicts
-            content (str): New content to resolve conflicts
-            message (str): Commit message for the resolution
-
-        Returns:
-            Dict[str, Any]: A dictionary containing:
-                - success (bool): Whether the operation succeeded
-                - error (str): Error message if unsuccessful
-        """
-        try:
-            # Write the resolved content
-            with open(file_path, "w") as f:
-                f.write(content)
-
-            # Stage and commit the resolved file
-            repo.index.add([file_path])
-            repo.index.commit(message)
-
-            return {"success": True}
-        except Exception as e:
-            return {"success": False, "error": f"Unexpected error: {str(e)}"}
-
-    def can_access_repository(self, repo_url: str) -> bool:
-        """Check if a git repository is accessible."""
-        try:
-            result = subprocess.run(
-                ["git", "ls-remote", repo_url],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
     def check_fork_exists(self, owner: str, repo_name: str) -> Dict[str, Any]:
         """Check if fork exists using GitHub API."""
         try:
             response = requests.get(
                 f"https://api.github.com/repos/{owner}/{repo_name}",
-                headers={"Authorization": f"token {os.environ.get('GITHUB_TOKEN')}"},
+                headers={"Authorization": f"token {self.token}"},
             )
             if response.status_code != 200:
                 return {"success": False, "error": "Repository not found"}
             return {"success": True, "exists": True}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def commit_and_push(self, repo: Repo, message: str, file_path: Optional[str] = None) -> Dict[str, Any]:
-        """Commit and push changes."""
-        try:
-            if file_path:
-                repo.git.add(file_path)
-            else:
-                repo.git.add(A=True)
-            repo.index.commit(message)
-            origin = repo.remotes.origin
-            repo.git.push(origin)
-            return {"success": True}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def check_for_conflicts(self, repo: Repo) -> Dict[str, Any]:
-        """Check if there are merge conflicts."""
-        try:
-            unmerged = [item.a_path for item in repo.index.unmerged_blobs()]
-            return {"success": True, "has_conflicts": bool(unmerged), "conflicting_files": unmerged}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def get_conflict_info(self, repo: Repo) -> Dict[str, Any]:
-        """Get details about current conflicts."""
-        try:
-            conflicts = {}
-            for item in repo.index.unmerged_blobs():
-                file_path = item.a_path
-                versions = {}
-                for stage, blob in item.entries.items():
-                    if stage == 1:
-                        versions["ancestor"] = blob.data_stream.read().decode()
-                    elif stage == 2:
-                        versions["ours"] = blob.data_stream.read().decode()
-                    elif stage == 3:
-                        versions["theirs"] = blob.data_stream.read().decode()
-                conflicts[file_path] = {"content": versions}
-            return {"success": True, "conflicts": conflicts}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def create_merge_commit(self, repo: Repo, message: str) -> Dict[str, Any]:
-        """Create a merge commit after resolving conflicts."""
-        try:
-            if not repo.index.diff("HEAD"):
-                return {"success": False, "error": "No changes to commit"}
-            commit = repo.index.commit(message)
-            return {"success": True, "commit_id": commit.hexsha}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-    def clone_repo(self, repo_url: str) -> Dict[str, Any]:
-        """Clone a repository."""
-        try:
-            Repo.clone_from(repo_url, Path.cwd())
-            return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}

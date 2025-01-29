@@ -302,8 +302,28 @@ def commit_and_push(repo: Repo, message: str, file_path: Optional[str] = None) -
 def check_for_conflicts(repo: Repo) -> Dict[str, Any]:
     """Check if there are merge conflicts."""
     try:
-        unmerged = [item.a_path for item in repo.index.unmerged_blobs()]
-        return {"success": True, "has_conflicts": bool(unmerged), "conflicting_files": unmerged}
+        # Check unmerged paths in the index
+        unmerged = repo.index.unmerged_blobs()
+        conflicting_files = list(unmerged.keys())
+
+        # If no unmerged blobs found, check for conflict markers in files
+        if not conflicting_files:
+            for file_path in repo.git.ls_files().split('\n'):
+                if not file_path:
+                    continue
+                try:
+                    with open(Path(repo.working_dir) / file_path) as f:
+                        content = f.read()
+                        if "<<<<<<< HEAD" in content:
+                            conflicting_files.append(file_path)
+                except:
+                    continue
+
+        return {
+            "success": True,
+            "has_conflicts": bool(conflicting_files),
+            "conflicting_files": conflicting_files
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -312,17 +332,35 @@ def get_conflict_info(repo: Repo) -> Dict[str, Any]:
     """Get details about current conflicts."""
     try:
         conflicts = {}
-        for item in repo.index.unmerged_blobs():
-            file_path = item.a_path
+        unmerged = repo.index.unmerged_blobs()
+
+        # First try to get info from unmerged blobs
+        for path, blobs in unmerged.items():
             versions = {}
-            for stage, blob in item.entries.items():
+            for stage_blob in blobs:
+                stage = stage_blob.stage
+                blob = stage_blob.blob
                 if stage == 1:
                     versions["ancestor"] = blob.data_stream.read().decode()
                 elif stage == 2:
                     versions["ours"] = blob.data_stream.read().decode()
                 elif stage == 3:
                     versions["theirs"] = blob.data_stream.read().decode()
-            conflicts[file_path] = {"content": versions}
+            conflicts[path] = {"content": versions}
+
+        # If no unmerged blobs, check for conflict markers
+        if not conflicts:
+            for file_path in repo.git.ls_files().split('\n'):
+                if not file_path:
+                    continue
+                try:
+                    with open(Path(repo.working_dir) / file_path) as f:
+                        content = f.read()
+                        if "<<<<<<< HEAD" in content:
+                            conflicts[file_path] = {"content": {"raw": content}}
+                except:
+                    continue
+
         return {"success": True, "conflicts": conflicts}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -331,10 +369,13 @@ def get_conflict_info(repo: Repo) -> Dict[str, Any]:
 def resolve_conflict(repo: Repo, file_path: str, resolution: str, message: str = "Resolve conflict") -> Dict[str, Any]:
     """Resolve a conflict in a specific file and commit the resolution."""
     try:
+        # Write the resolved content
         full_path = Path(repo.working_dir) / file_path
         full_path.write_text(resolution)
+
+        # Stage the resolved file
         repo.index.add([file_path])
-        repo.index.commit(message)  # Commit the resolved file
+
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -343,8 +384,11 @@ def resolve_conflict(repo: Repo, file_path: str, resolution: str, message: str =
 def create_merge_commit(repo: Repo, message: str) -> Dict[str, Any]:
     """Create a merge commit after resolving conflicts."""
     try:
-        if not repo.index.diff("HEAD"):
-            return {"success": False, "error": "No changes to commit"}
+        # Check if there are any remaining conflicts
+        if check_for_conflicts(repo)["has_conflicts"]:
+            return {"success": False, "error": "Cannot create merge commit with unresolved conflicts"}
+
+        # Create the merge commit
         commit = repo.index.commit(message)
         return {"success": True, "commit_id": commit.hexsha}
     except Exception as e:
