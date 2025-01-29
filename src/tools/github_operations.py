@@ -4,9 +4,17 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 from github import Github, Auth, GithubException
-from .git_operations import run_git_command
+from git import Repo
 from dotenv import load_dotenv
 from .pr_template import validate_pr_description
+from src.tools.git_operations import (
+    clone_repository,
+    add_remote,
+    fetch_remote,
+    pull_remote,
+    push_remote,
+)
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,8 +26,11 @@ class GitHubOperations:
     def __init__(self):
         """Initialize GitHub operations."""
         self.token = os.environ.get("GITHUB_TOKEN")
+        self.username = os.environ.get("GITHUB_USERNAME")
         if not self.token:
-            raise ValueError("GITHUB_TOKEN environment variable is not set")
+            raise ValueError("Missing GITHUB_TOKEN")
+        if not self.username:
+            raise ValueError("Missing GITHUB_USERNAME")
         self.gh = Github(auth=Auth.Token(self.token))
 
     def get_pr_template(self) -> str:
@@ -34,17 +45,20 @@ class GitHubOperations:
             raise FileNotFoundError("PR template file not found")
         return template_path.read_text()
 
-    def fork_repository(self, repo_full_name: str) -> Dict[str, Any]:
+    def fork_repository(self, repo_full_name: str, target_dir: str = None) -> Dict[str, Any]:
         """
-        Fork a repository.
+        Fork a repository and clone it locally.
 
         Args:
             repo_full_name (str): Full name of the repository (e.g. "owner/repo")
+            target_dir (str, optional): Directory where to clone the fork.
+                                      If None, uses current directory
 
         Returns:
             Dict[str, Any]: A dictionary containing:
                 - success (bool): Whether the operation succeeded
                 - fork_url (str): URL of the forked repository if successful
+                - repo (Repo): GitPython Repo instance if successful
                 - error (str): Error message if unsuccessful
         """
         try:
@@ -53,10 +67,46 @@ class GitHubOperations:
             print(f"Creating fork of repository: {repo.full_name}")
             fork = self.gh.get_user().create_fork(repo)
             print(f"Fork created: {fork.full_name}")
+            print(f"Fork URL: {fork.clone_url}")
+
+            # Wait for GitHub to propagate the fork
+            print("Waiting for fork to be propagated...")
+            time.sleep(5)
+
+            # Clone the fork
+            target_dir = target_dir or os.path.basename(fork.name)
+            print(f"Cloning fork to {target_dir}")
+            clone_result = clone_repository(
+                fork.clone_url,
+                target_dir,
+                user_name=self.username,
+                user_email=f"{self.username}@users.noreply.github.com"
+            )
+
+            if not clone_result["success"]:
+                print(f"Failed to clone repository: {clone_result['error']}")
+                return {
+                    "success": False,
+                    "error": f"Failed to clone repository: {clone_result['error']}",
+                }
+
+            # Add upstream remote
+            repo = clone_result["repo"]
+            upstream_url = f"https://github.com/{repo_full_name}.git"
+            print(f"Adding upstream remote: {upstream_url}")
+            add_remote_result = add_remote(repo, "upstream", upstream_url)
+            if not add_remote_result["success"]:
+                print(f"Failed to add upstream remote: {add_remote_result['error']}")
+                return {
+                    "success": False,
+                    "error": f"Failed to add upstream remote: {add_remote_result['error']}",
+                }
+
             return {
                 "success": True,
                 "fork_url": fork.clone_url,
                 "fork_full_name": fork.full_name,
+                "repo": repo,
             }
         except GithubException as e:
             print(f"GitHub API error: {str(e)}")
@@ -127,14 +177,13 @@ class GitHubOperations:
             return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
     def sync_fork(
-        self, fork_full_name: str, upstream_full_name: str, branch: str = "main"
+        self, repo: Repo, branch: str = "main"
     ) -> Dict[str, Any]:
         """
         Sync a fork with its upstream repository.
 
         Args:
-            fork_full_name (str): Full name of the fork (e.g. "owner/repo")
-            upstream_full_name (str): Full name of the upstream repository
+            repo (Repo): GitPython Repo instance
             branch (str): Branch to sync (default: main)
 
         Returns:
@@ -143,38 +192,21 @@ class GitHubOperations:
                 - error (str): Error message if unsuccessful
         """
         try:
-            print(f"Syncing fork {fork_full_name} with upstream {upstream_full_name}")
-
-            # Get the current working directory
-            cwd = os.getcwd()
-            print(f"Working directory: {cwd}")
+            print(f"Syncing fork with upstream, branch: {branch}")
 
             # Fetch from upstream
-            fetch_result = run_git_command("fetch upstream", cwd=cwd)
+            fetch_result = fetch_remote(repo, "upstream")
             if not fetch_result["success"]:
-                print(f"Failed to fetch from upstream: {fetch_result.get('error', '')}")
                 return fetch_result
 
-            # Ensure we're on the correct branch
-            checkout_result = run_git_command(f"checkout {branch}", cwd=cwd)
-            if not checkout_result["success"]:
-                print(
-                    f"Failed to checkout branch {branch}: {checkout_result.get('error', '')}"
-                )
-                return checkout_result
+            # Pull from upstream
+            pull_result = pull_remote(repo, "upstream", branch)
+            if not pull_result["success"]:
+                return pull_result
 
-            # Merge upstream changes
-            merge_result = run_git_command(f"merge upstream/{branch}", cwd=cwd)
-            if not merge_result["success"]:
-                print(
-                    f"Failed to merge upstream/{branch}: {merge_result.get('error', '')}"
-                )
-                return merge_result
-
-            # Push changes to origin
-            push_result = run_git_command(f"push origin {branch}", cwd=cwd)
+            # Push to origin
+            push_result = push_remote(repo, "origin", branch)
             if not push_result["success"]:
-                print(f"Failed to push to origin: {push_result.get('error', '')}")
                 return push_result
 
             print("Successfully synced fork with upstream")
@@ -185,12 +217,13 @@ class GitHubOperations:
             return {"success": False, "error": error_msg}
 
     def resolve_merge_conflicts(
-        self, file_path: str, content: str, message: str = "Resolve merge conflicts"
+        self, repo: Repo, file_path: str, content: str, message: str = "Resolve merge conflicts"
     ) -> Dict[str, Any]:
         """
         Resolve merge conflicts in a file.
 
         Args:
+            repo (Repo): GitPython Repo instance
             file_path (str): Path to the file with conflicts
             content (str): New content to resolve conflicts
             message (str): Commit message for the resolution
@@ -205,15 +238,9 @@ class GitHubOperations:
             with open(file_path, "w") as f:
                 f.write(content)
 
-            # Stage the resolved file
-            stage_result = run_git_command(f"add {file_path}")
-            if not stage_result["success"]:
-                return stage_result
-
-            # Commit the resolution
-            commit_result = run_git_command(f'commit -m "{message}"')
-            if not commit_result["success"]:
-                return commit_result
+            # Stage and commit the resolved file
+            repo.index.add([file_path])
+            repo.index.commit(message)
 
             return {"success": True}
         except Exception as e:

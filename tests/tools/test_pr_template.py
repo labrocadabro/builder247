@@ -1,7 +1,6 @@
 """Tests for PR template validation."""
 
-import pytest
-from src.pr_template import validate_pr_description
+from src.tools.pr_template import validate_pr_description
 
 
 def test_valid_pr_description():

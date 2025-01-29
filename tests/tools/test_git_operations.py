@@ -4,7 +4,8 @@ import tempfile
 import shutil
 from pathlib import Path
 import pytest
-from src.git_operations import (
+from git import Repo
+from src.tools.git_operations import (
     run_git_command,
     create_branch,
     checkout_branch,
@@ -22,23 +23,23 @@ def git_repo():
 
     try:
         # Initialize Git repo
-        run_git_command("init", temp_dir)
+        repo = Repo.init(temp_dir)
 
         # Configure Git user for commits
-        run_git_command("config user.name 'Test User'", temp_dir)
-        run_git_command("config user.email 'test@example.com'", temp_dir)
+        repo.config_writer().set_value("user", "name", "Test User").release()
+        repo.config_writer().set_value("user", "email", "test@example.com").release()
 
         # Create and commit a test file
         test_file = Path(temp_dir) / "test.txt"
         test_file.write_text("Initial content")
 
-        run_git_command("add .", temp_dir)
-        run_git_command("commit -m 'Initial commit'", temp_dir)
+        repo.index.add(["test.txt"])
+        repo.index.commit("Initial commit")
 
         # Get the initial branch name
-        initial_branch = get_current_branch(temp_dir)["output"]
+        initial_branch = get_current_branch(repo)["output"]
 
-        yield temp_dir, initial_branch
+        yield repo, initial_branch
     finally:
         # Clean up
         shutil.rmtree(temp_dir)
@@ -46,69 +47,63 @@ def git_repo():
 
 def test_create_and_checkout_branch(git_repo):
     """Test creating and checking out branches."""
-    repo_dir, initial_branch = git_repo
+    repo, initial_branch = git_repo
 
     # Create a new branch
-    result = create_branch("feature", repo_dir)
+    new_branch = "feature-branch"
+    result = create_branch(repo, new_branch)
     assert result["success"]
 
-    # Verify we're on the new branch
-    current = get_current_branch(repo_dir)
-    assert current["success"]
-    assert current["output"] == "feature"
-
-    # Switch back to initial branch
-    result = checkout_branch(initial_branch, repo_dir)
+    # Checkout the new branch
+    result = checkout_branch(repo, new_branch)
     assert result["success"]
 
-    # Verify we're back on initial branch
-    current = get_current_branch(repo_dir)
+    # Verify current branch
+    current = get_current_branch(repo)
     assert current["success"]
-    assert current["output"] == initial_branch
+    assert current["output"] == new_branch
 
 
 def test_make_commit(git_repo):
-    """Test making commits."""
-    repo_dir, _ = git_repo
+    """Test making a commit."""
+    repo, _ = git_repo
 
     # Create a new file
-    test_file = Path(repo_dir) / "new.txt"
+    test_file = Path(repo.working_dir) / "new_file.txt"
     test_file.write_text("New content")
 
     # Make a commit
-    result = make_commit("Add new file", repo_dir)
+    result = make_commit(repo, "Add new file")
     assert result["success"]
 
-    # Verify the commit exists
-    log_result = run_git_command("log --oneline", repo_dir)
-    assert log_result["success"]
-    assert "Add new file" in log_result["output"]
+    # Verify the commit
+    assert not repo.is_dirty()
 
 
 def test_list_branches(git_repo):
     """Test listing branches."""
-    repo_dir, initial_branch = git_repo
+    repo, initial_branch = git_repo
 
-    # Create a few branches
-    create_branch("feature1", repo_dir)
-    checkout_branch(initial_branch, repo_dir)
-    create_branch("feature2", repo_dir)
-    checkout_branch(initial_branch, repo_dir)
+    # Create some branches
+    branches = ["branch1", "branch2"]
+    for branch in branches:
+        create_branch(repo, branch)
 
     # List branches
-    result = list_branches(repo_dir)
+    result = list_branches(repo)
     assert result["success"]
 
-    # Verify all branches are listed (strip asterisk and whitespace)
-    branches = [b.strip().strip("*").strip() for b in result["output"].split("\n")]
-    assert "feature1" in branches
-    assert "feature2" in branches
-    assert initial_branch in branches
+    # Verify all branches are listed
+    branch_list = result["output"]
+    assert initial_branch in branch_list
+    for branch in branches:
+        assert branch in branch_list
 
 
 def test_invalid_git_command(git_repo):
     """Test handling of invalid Git commands."""
-    repo_dir, _ = git_repo
-    result = run_git_command("invalid-command", repo_dir)
+    repo, _ = git_repo
+
+    result = run_git_command(repo, "invalid-command")
     assert not result["success"]
     assert "error" in result

@@ -1,5 +1,5 @@
 # Use the official Python image from the Docker Hub
-FROM python:3.9-slim
+FROM python:3.12-slim
 
 # Set the working directory in the container
 WORKDIR /app
@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y git sudo
 
 # Install the dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Configure Git to add the safe directory
+RUN git config --global --add safe.directory /app
 
 # Copy the rest of your application code into the container
 COPY . .

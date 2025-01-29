@@ -3,6 +3,7 @@
 import os
 import shutil
 from typing import Dict, Any
+from pathlib import Path
 
 
 def read_file(file_path: str) -> Dict[str, Any]:
@@ -137,3 +138,25 @@ def delete_file(file_path: str) -> Dict[str, Any]:
         return {"success": False, "error": f"File not found: {file_path}"}
     except Exception as e:
         return {"success": False, "error": f"Error deleting file: {str(e)}"}
+
+def list_files(directory: str) -> list:
+    """
+    Return a list of all files in the specified directory and its subdirectories.
+
+    Parameters:
+    directory (str or Path): The directory to search for files.
+
+    Returns:
+    list: A list of file paths relative to the specified directory or CWD.
+    """
+    directory = Path(directory)
+
+    # Check if the directory exists
+    if not directory.exists() or not directory.is_dir():
+        raise FileNotFoundError(f"The directory '{directory}' does not exist.")
+
+    # Check if the provided path is absolute
+    if not directory.is_absolute():
+        directory = Path.cwd() / directory
+
+    return [str(file.relative_to(directory)) for file in directory.rglob('*') if file.is_file()]

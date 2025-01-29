@@ -1,17 +1,18 @@
 """Module for Git operations."""
 
-import subprocess
-import shlex
+from git import Repo, GitCommandError
 from typing import Dict, Any
+from pathlib import Path
 
 
-def run_git_command(command: str, cwd: str = None) -> Dict[str, Any]:
+def run_git_command(repo: Repo, command: str, **kwargs) -> Dict[str, Any]:
     """
-    Run a Git command and return the result.
+    Run a Git command using GitPython and return the result.
 
     Args:
-        command (str): The Git command to run (without the 'git' prefix)
-        cwd (str): The working directory to run the command in (default: current directory)
+        repo (Repo): The GitPython Repo instance
+        command (str): The Git command to run
+        **kwargs: Additional arguments to pass to the git command
 
     Returns:
         Dict[str, Any]: A dictionary containing:
@@ -20,101 +21,237 @@ def run_git_command(command: str, cwd: str = None) -> Dict[str, Any]:
             - error (str): Error message if unsuccessful
     """
     try:
-        # Split the command using shlex to handle quotes properly
-        cmd_parts = ["git"] + shlex.split(command)
-        print(f"Running Git command: {' '.join(cmd_parts)}")
-
-        # Run the command
-        result = subprocess.run(
-            cmd_parts, cwd=cwd, capture_output=True, text=True, check=True
-        )
-        print(f"Command output: {result.stdout.strip()}")
-        print(f"Command stderr: {result.stderr.strip()}")
-
-        return {"success": True, "output": result.stdout.strip()}
-    except subprocess.CalledProcessError as e:
-        print(f"Command failed with error: {e.stderr.strip() or str(e)}")
-        return {"success": False, "error": e.stderr.strip() or str(e)}
+        git = repo.git
+        method = getattr(git, command.replace('-', '_'))
+        output = method(**kwargs)
+        return {"success": True, "output": output}
+    except GitCommandError as e:
+        return {"success": False, "error": str(e)}
     except Exception as e:
-        print(f"Exception occurred: {str(e)}")
         return {"success": False, "error": str(e)}
 
 
-def create_branch(branch_name: str, cwd: str = None) -> Dict[str, Any]:
+def init_repository(path: str, user_name: str = None, user_email: str = None) -> Dict[str, Any]:
+    """
+    Initialize a new Git repository.
+
+    Args:
+        path (str): Path where to initialize the repository
+        user_name (str, optional): Git user name to configure
+        user_email (str, optional): Git user email to configure
+
+    Returns:
+        Dict[str, Any]: Result of the operation
+    """
+    try:
+        repo = Repo.init(path)
+        if user_name:
+            repo.config_writer().set_value("user", "name", user_name).release()
+        if user_email:
+            repo.config_writer().set_value("user", "email", user_email).release()
+        return {"success": True, "repo": repo}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def clone_repository(url: str, path: str, user_name: str = None, user_email: str = None) -> Dict[str, Any]:
+    """
+    Clone a Git repository.
+
+    Args:
+        url (str): URL of the repository to clone
+        path (str): Path where to clone the repository
+        user_name (str, optional): Git user name to configure
+        user_email (str, optional): Git user email to configure
+
+    Returns:
+        Dict[str, Any]: Result of the operation
+    """
+    try:
+        repo = Repo.clone_from(url, path)
+        if user_name:
+            repo.config_writer().set_value("user", "name", user_name).release()
+        if user_email:
+            repo.config_writer().set_value("user", "email", user_email).release()
+        return {"success": True, "repo": repo}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def create_branch(repo: Repo, branch_name: str) -> Dict[str, Any]:
     """
     Create a new Git branch.
 
     Args:
+        repo (Repo): The GitPython Repo instance
         branch_name (str): Name of the branch to create
-        cwd (str): The working directory to run the command in (default: current directory)
 
     Returns:
         Dict[str, Any]: Result of the operation
     """
-    return run_git_command(f"checkout -b {branch_name}", cwd)
+    try:
+        current = repo.active_branch
+        new_branch = repo.create_head(branch_name)
+        new_branch.checkout()
+        return {"success": True, "previous_branch": current.name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
-def checkout_branch(branch_name: str, cwd: str = None) -> Dict[str, Any]:
+def checkout_branch(repo: Repo, branch_name: str) -> Dict[str, Any]:
     """
     Check out an existing Git branch.
 
     Args:
+        repo (Repo): The GitPython Repo instance
         branch_name (str): Name of the branch to check out
-        cwd (str): The working directory to run the command in (default: current directory)
 
     Returns:
         Dict[str, Any]: Result of the operation
     """
-    return run_git_command(f"checkout {branch_name}", cwd)
+    try:
+        branch = repo.heads[branch_name]
+        branch.checkout()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
-def make_commit(message: str, cwd: str = None) -> Dict[str, Any]:
+def make_commit(repo: Repo, message: str, add_all: bool = True) -> Dict[str, Any]:
     """
-    Stage all changes and create a commit.
+    Stage changes and create a commit.
 
     Args:
+        repo (Repo): The GitPython Repo instance
         message (str): The commit message
-        cwd (str): The working directory to run the command in (default: current directory)
+        add_all (bool): Whether to stage all changes
 
     Returns:
         Dict[str, Any]: Result of the operation
     """
-    # First stage all changes
-    stage_result = run_git_command("add .", cwd)
-    if not stage_result["success"]:
-        return stage_result
+    try:
+        if add_all:
+            repo.git.add(A=True)
+        else:
+            repo.git.add(u=True)
+        commit = repo.index.commit(message)
+        return {"success": True, "commit_hash": commit.hexsha}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-    # Then create the commit
-    return run_git_command(f'commit -m "{message}"', cwd)
 
-
-def get_current_branch(cwd: str = None) -> Dict[str, Any]:
+def get_current_branch(repo: Repo) -> Dict[str, Any]:
     """
     Get the name of the current Git branch.
 
     Args:
-        cwd (str): The working directory to run the command in (default: current directory)
+        repo (Repo): The GitPython Repo instance
 
     Returns:
-        Dict[str, Any]: Result of the operation
+        Dict[str, Any]: Result of the operation with the branch name in the 'output' field
     """
-    # Try symbolic-ref first (works for branches)
-    result = run_git_command("symbolic-ref --short HEAD", cwd)
-    if result["success"]:
-        return result
-
-    # Fall back to rev-parse (works for detached HEAD)
-    return run_git_command("rev-parse --abbrev-ref HEAD", cwd)
+    try:
+        return {"success": True, "output": repo.active_branch.name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
-def list_branches(cwd: str = None) -> Dict[str, Any]:
+def list_branches(repo: Repo) -> Dict[str, Any]:
     """
     List all Git branches.
 
     Args:
-        cwd (str): The working directory to run the command in (default: current directory)
+        repo (Repo): The GitPython Repo instance
+
+    Returns:
+        Dict[str, Any]: Result of the operation with branch list in the 'output' field
+    """
+    try:
+        branches = [head.name for head in repo.heads]
+        return {"success": True, "output": branches}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def add_remote(repo: Repo, name: str, url: str) -> Dict[str, Any]:
+    """
+    Add a remote to the repository.
+
+    Args:
+        repo (Repo): The GitPython Repo instance
+        name (str): Name of the remote
+        url (str): URL of the remote
 
     Returns:
         Dict[str, Any]: Result of the operation
     """
-    return run_git_command("branch", cwd)
+    try:
+        repo.create_remote(name, url)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def fetch_remote(repo: Repo, remote_name: str = "origin") -> Dict[str, Any]:
+    """
+    Fetch from a remote.
+
+    Args:
+        repo (Repo): The GitPython Repo instance
+        remote_name (str): Name of the remote to fetch from
+
+    Returns:
+        Dict[str, Any]: Result of the operation
+    """
+    try:
+        remote = repo.remotes[remote_name]
+        remote.fetch()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def pull_remote(repo: Repo, remote_name: str = "origin", branch: str = None) -> Dict[str, Any]:
+    """
+    Pull from a remote.
+
+    Args:
+        repo (Repo): The GitPython Repo instance
+        remote_name (str): Name of the remote to pull from
+        branch (str, optional): Branch to pull. If None, pulls active branch
+
+    Returns:
+        Dict[str, Any]: Result of the operation
+    """
+    try:
+        remote = repo.remotes[remote_name]
+        if branch:
+            remote.pull(branch)
+        else:
+            remote.pull()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def push_remote(repo: Repo, remote_name: str = "origin", branch: str = None) -> Dict[str, Any]:
+    """
+    Push to a remote.
+
+    Args:
+        repo (Repo): The GitPython Repo instance
+        remote_name (str): Name of the remote to push to
+        branch (str, optional): Branch to push. If None, pushes active branch
+
+    Returns:
+        Dict[str, Any]: Result of the operation
+    """
+    try:
+        remote = repo.remotes[remote_name]
+        if branch:
+            remote.push(branch)
+        else:
+            remote.push()
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

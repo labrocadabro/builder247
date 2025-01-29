@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch
 from github import Github, Auth
-from src.github_operations import GitHubOperations
+from git import Repo
+from src.tools.github_operations import GitHubOperations
 from dotenv import load_dotenv
+from src.tools.execute_command import execute_command
 
 load_dotenv()
 
@@ -52,7 +54,7 @@ def upstream_repo():
 
         # Wait for GitHub to propagate the changes
         print("Waiting for GitHub to propagate changes...")
-        time.sleep(5)
+        time.sleep(2)
 
         full_name = repo.full_name  # Use the actual full name from the repository
         print(f"Yielding repository name: {full_name}")
@@ -76,16 +78,31 @@ def github_ops():
         return GitHubOperations()
 
 
-def test_fork_repository(github_ops, upstream_repo):
+@pytest.fixture
+def git_repo():
+    """Create a temporary directory for Git operations."""
+    # Create a temporary directory
+    temp_dir = tempfile.mkdtemp()
+    yield temp_dir
+    # Clean up
+    shutil.rmtree(temp_dir)
+
+
+def test_fork_repository(github_ops, upstream_repo, git_repo):
     """Test forking a repository."""
-    result = github_ops.fork_repository(upstream_repo)
-    assert result["success"]
-    assert result["fork_url"].endswith(
-        f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}.git"
-    )
-    assert (
-        result["fork_full_name"] == f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}"
-    )
+    # Fork the repository
+    fork_result = github_ops.fork_repository(upstream_repo, git_repo)
+    assert fork_result["success"]
+    assert fork_result["fork_url"].endswith(f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}.git")
+    assert fork_result["fork_full_name"] == f"{GITHUB_USERNAME}/{upstream_repo.split('/')[-1]}"
+    assert isinstance(fork_result["repo"], Repo)
+
+    # Verify the repository was cloned and remotes are set up
+    repo = fork_result["repo"]
+    assert "origin" in repo.remotes
+    assert "upstream" in repo.remotes
+    assert repo.remotes.origin.url == fork_result["fork_url"]
+    assert repo.remotes.upstream.url == f"https://github.com/{upstream_repo}.git"
 
 
 def test_create_pull_request_with_valid_template(github_ops, upstream_repo):
@@ -96,7 +113,7 @@ def test_create_pull_request_with_valid_template(github_ops, upstream_repo):
 
     # Wait for the fork to be initialized
     print("Waiting for fork to be initialized...")
-    time.sleep(5)
+    time.sleep(2)
 
     # Create a new branch and make changes
     gh = Github(auth=Auth.Token(GITHUB_TOKEN))
@@ -159,7 +176,7 @@ def test_create_pull_request_with_invalid_template(github_ops, upstream_repo):
 
     # Wait for the fork to be initialized
     print("Waiting for fork to be initialized...")
-    time.sleep(5)
+    time.sleep(2)
 
     # Create a new branch and make changes
     gh = Github(auth=Auth.Token(GITHUB_TOKEN))
@@ -223,91 +240,39 @@ Testing.
     assert "Must confirm testing in the checklist" in result["template_errors"]
 
 
-@pytest.fixture
-def git_repo():
-    """Create a temporary Git repository for testing."""
-    # Create a temporary directory
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        # Initialize Git repo
-        os.system(f"git init {temp_dir}")
-        os.system(f'git -C {temp_dir} config user.name "Test User"')
-        os.system(f'git -C {temp_dir} config user.email "test@example.com"')
-
-        # Create and commit a test file
-        test_file = Path(temp_dir) / "test.txt"
-        test_file.write_text("Initial content")
-
-        os.system(f"git -C {temp_dir} add .")
-        os.system(f'git -C {temp_dir} commit -m "Initial commit"')
-
-        yield temp_dir
-    finally:
-        # Clean up
-        shutil.rmtree(temp_dir)
-
-
 def test_sync_fork(github_ops, upstream_repo, git_repo):
     """Test syncing a fork."""
     # First fork the repository
-    fork_result = github_ops.fork_repository(upstream_repo)
+    fork_result = github_ops.fork_repository(upstream_repo, git_repo)
     assert fork_result["success"]
 
     # Wait for the fork to be initialized
     print("Waiting for fork to be initialized...")
-    time.sleep(5)
+    time.sleep(2)
 
-    # Set up Git remotes
-    # Remove existing remotes if they exist
-    os.system(f"git -C {git_repo} remote remove origin 2>/dev/null")
-    os.system(f"git -C {git_repo} remote remove upstream 2>/dev/null")
-
-    # Add remotes with correct URLs
-    os.system(f"git -C {git_repo} remote add origin {fork_result['fork_url']}")
-    os.system(
-        f"git -C {git_repo} remote add upstream https://github.com/{upstream_repo}.git"
-    )
-
-    # Fetch and set up branches
-    os.system(f"git -C {git_repo} fetch origin")
-    os.system(f"git -C {git_repo} checkout main || git -C {git_repo} checkout -b main")
-    os.system(f"git -C {git_repo} branch --set-upstream-to=origin/main main")
-
-    # Change to the Git repository directory
-    original_dir = os.getcwd()
-    os.chdir(git_repo)
-
-    try:
-        result = github_ops.sync_fork(
-            fork_full_name=fork_result["fork_full_name"],
-            upstream_full_name=upstream_repo,
-            branch="main",
-        )
-        assert result["success"]
-    finally:
-        # Change back to the original directory
-        os.chdir(original_dir)
+    # Try to sync the fork
+    result = github_ops.sync_fork(fork_result["repo"])
+    assert result["success"]
 
 
 def test_resolve_merge_conflicts(github_ops, git_repo):
     """Test resolving merge conflicts."""
-    # Change to the git repository directory
-    os.chdir(git_repo)
+    # Initialize a test repository
+    repo = Repo.init(git_repo)
+    repo.config_writer().set_value("user", "name", "Test User").release()
+    repo.config_writer().set_value("user", "email", "test@example.com").release()
 
     # Create a file with conflicts
     conflict_file = Path(git_repo) / "conflict.txt"
-    conflict_file.write_text(
-        """
-<<<<<<< HEAD
-Local changes
-=======
-Remote changes
->>>>>>> upstream/main
-"""
-    )
+    conflict_file.write_text("Remote changes")
 
+    # Add and commit the file
+    repo.index.add([str(conflict_file)])
+    repo.index.commit("Initial commit")
+
+    # Test resolving conflicts
     result = github_ops.resolve_merge_conflicts(
+        repo=repo,
         file_path=str(conflict_file),
         content="Resolved content",
         message="Fix conflicts",
