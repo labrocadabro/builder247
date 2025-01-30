@@ -20,9 +20,11 @@ from src.tools.git_operations import (
     resolve_conflict,
     commit_and_push,
 )
+from src.tools.file_operations import copy_file
 
 import time
 import requests
+import shutil
 
 # Load environment variables from .env file
 load_dotenv()
@@ -43,14 +45,25 @@ class GitHubOperations:
 
     def get_pr_template(self) -> str:
         """
-        Get the PR template content.
+        Get the PR template content. If the template doesn't exist in .github/,
+        copy it from docs/agent/pr_template.md.
 
         Returns:
             str: The PR template content
         """
         template_path = Path(".github/pull_request_template.md")
+        source_template = Path("docs/agent/pr_template.md")
+
+        # If template doesn't exist, try to copy it from source
         if not template_path.exists():
-            raise FileNotFoundError("PR template file not found")
+            if not source_template.exists():
+                raise FileNotFoundError("Source PR template file not found")
+
+            # Create .github directory and copy template
+            template_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(source_template), str(template_path))
+
+        # Read and return the template content
         return template_path.read_text()
 
     def fork_repository(self, repo_full_name: str, target_dir: str = None) -> Dict[str, Any]:

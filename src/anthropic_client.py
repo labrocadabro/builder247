@@ -1,12 +1,11 @@
 """Module for testing Claude's tool use capabilities."""
 
 import os
-from typing import Dict, Any, Optional, List, TypedDict, Union, Callable, Literal
+from typing import Dict, Any, Optional, List, TypedDict, Callable
 from anthropic import Anthropic
 from anthropic.types import (
     ToolParam,
     ToolChoiceParam,
-    ToolResultBlockParam,
     ContentBlockParam,
     ToolUseBlock,
 )
@@ -20,12 +19,6 @@ class MessageContent(TypedDict):
 class ToolConfig(TypedDict):
     tool_definitions: List[ToolParam]
     tool_choice: ToolChoiceParam
-
-
-class ToolResponse(TypedDict):
-    type: Literal["tool_result"]
-    tool_use_id: str
-    tool_result: ToolResultBlockParam
 
 
 class AnthropicClient:
@@ -51,24 +44,18 @@ class AnthropicClient:
         tool_choice = tool_choice or {"type": "auto"}
         return ToolConfig(tool_definitions=self.tools, tool_choice=tool_choice)
 
-    def create_tool_response(
-        self, tool_id: str, tool_response: ToolResultBlockParam
-    ) -> ToolResponse:
-        return ToolResponse(
-            type="tool_result", tool_use_id=tool_id, tool_result=tool_response
-        )
-
     def register_tool(self, tool_definition: ToolParam, tool_function: Callable) -> str:
         self.tools.append(tool_definition)
         self.tool_functions[tool_definition["name"]] = tool_function
 
     def send_message(
         self,
-        prompt: str,
+        prompt: Optional[str] = None,
         previous_messages: Optional[List[MessageContent]] = None,
         max_tokens: Optional[int] = 1024,
         tool_choice: Optional[ToolChoiceParam] = None,
-        tool_response: Optional[ToolResponse] = None,
+        tool_response: Optional[str] = None,
+        tool_use_id: Optional[str] = None,
     ) -> str:
         """
         Send a test message to Claude via the Anthropic API.
@@ -83,22 +70,36 @@ class AnthropicClient:
             ValueError: If CLAUDE_API_KEY is not set
         """
 
+        if not prompt and not tool_response:
+            raise ValueError("Prompt or tool response must be provided")
+
         messages = previous_messages or []
 
-        messages.append({"role": "user", "content": prompt})
+        if prompt:
+            messages.append({"role": "user", "content": prompt})
 
+        tool_config = self.create_tool_config(tool_choice)
+
+        if tool_response is not None:
+            if not tool_use_id:
+                raise ValueError("Tool use ID is required")
+
+            if not previous_messages:
+                raise ValueError(
+                    "A previous message with the tool call is required"
+                )
+
+            return self.send_message_with_tool_response(
+                tool_response,
+                tool_use_id,
+                tool_config,
+                previous_messages,
+                max_tokens,
+            )
         if tool_choice is not None:
             return self.send_message_with_tool(
                 messages,
-                self.create_tool_config(tool_choice),
-                max_tokens,
-            )
-
-        if tool_response is not None:
-            return self.send_message_with_tool_response(
-                self.create_tool_response(**tool_response),
-                prompt,
-                previous_messages,
+                tool_config,
                 max_tokens,
             )
 
@@ -139,9 +140,10 @@ class AnthropicClient:
 
     def send_message_with_tool_response(
         self,
-        tool_response: ToolResultBlockParam,
-        prompt: str,
-        previous_messages: Union[List[MessageContent], None],
+        tool_response: str,
+        tool_use_id: str,
+        tool_config: ToolConfig,
+        previous_messages: List[MessageContent],
         max_tokens: int,
     ):
         """
@@ -153,7 +155,13 @@ class AnthropicClient:
         messages.append(
             {
                 "role": "user",
-                "content": [{"type": "text", "content": prompt}, tool_response],
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": [{"type": "text", "text": tool_response}],
+                    }
+                ],
             }
         )
 
@@ -163,6 +171,8 @@ class AnthropicClient:
             model=self.model,
             max_tokens=max_tokens,
             messages=messages,
+            tools=tool_config["tool_definitions"],
+            tool_choice=tool_config["tool_choice"],
         )
 
     def execute_tool(self, tool_call: ToolUseBlock) -> str:

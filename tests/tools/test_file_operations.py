@@ -193,3 +193,24 @@ def test_list_files_in_nonexistent_directory():
     # Call the function with a nonexistent directory
     with pytest.raises(FileNotFoundError):
         fo.list_files("nonexistent_directory")
+
+def test_copy_file_with_absolute_paths(tmp_path):
+    """Test copying a file using absolute paths."""
+    # Create source directory and file
+    source_dir = tmp_path / "docs/agent"
+    source_dir.mkdir(parents=True)
+    source_file = source_dir / "source.txt"
+    source_file.write_text("Test content")
+
+    # Create destination directory
+    dest_dir = tmp_path / ".github"
+    dest_dir.mkdir(parents=True)
+    dest_file = dest_dir / "destination.txt"
+
+    # Copy using absolute paths
+    copy_result = fo.copy_file(str(source_file.absolute()), str(dest_file.absolute()))
+    assert copy_result["success"]
+
+    # Verify the copy
+    assert dest_file.exists()
+    assert dest_file.read_text() == "Test content"

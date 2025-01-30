@@ -23,6 +23,7 @@ from src.tools.git_operations import (
     resolve_conflict,
     create_merge_commit,
 )
+from unittest.mock import patch
 
 
 @pytest.fixture
@@ -131,37 +132,92 @@ def test_init_repository(tmp_path):
     assert config.get_value("user", "email") == "test@example.com"
 
 
-def test_add_and_fetch_remote(git_repo):
+def test_add_and_fetch_remote(tmp_path):
     """Test adding and fetching from a remote."""
-    repo, _ = git_repo
+    # Create a source repository that will act as our remote
+    source_repo_path = tmp_path / "source_repo"
+    source_repo = Repo.init(source_repo_path)
 
-    # Add a remote
-    result = add_remote(repo, "test-remote", "https://github.com/test/test.git")
+    # Add some content to the source repo
+    test_file = source_repo_path / "test.txt"
+    test_file.write_text("Remote content")
+    source_repo.index.add(["test.txt"])
+    source_repo.index.commit("Initial commit")
+
+    # Create our test repository
+    test_repo_path = tmp_path / "test_repo"
+    repo = Repo.init(test_repo_path)
+
+    # Configure Git user for commits
+    repo.config_writer().set_value("user", "name", "Test User").release()
+    repo.config_writer().set_value("user", "email", "test@example.com").release()
+
+    # Add the source repo as a remote
+    result = add_remote(repo, "test-remote", str(source_repo_path))
     assert result["success"]
     assert "test-remote" in [remote.name for remote in repo.remotes]
 
-    # Test fetch (this will fail as the remote doesn't exist, but we can check the error handling)
+    # Test fetch from the remote
     result = fetch_remote(repo, "test-remote")
-    assert not result["success"]
-    assert "error" in result
+    assert result["success"]
 
 
-def test_pull_and_push_remote(git_repo):
+def test_pull_and_push_remote(tmp_path):
     """Test pulling from and pushing to a remote."""
-    repo, _ = git_repo
+    # Create a source repository that will act as our remote
+    source_repo_path = tmp_path / "source_repo"
+    source_repo = Repo.init(source_repo_path, bare=True)  # Bare repo to allow pushing
 
-    # Add a remote
-    add_remote(repo, "test-remote", "https://github.com/test/test.git")
+    # Create our test repository
+    test_repo_path = tmp_path / "test_repo"
+    repo = Repo.init(test_repo_path)
 
-    # Test pull (will fail as remote doesn't exist, but we can check error handling)
-    result = pull_remote(repo, "test-remote")
-    assert not result["success"]
-    assert "error" in result
+    # Configure Git user for commits
+    repo.config_writer().set_value("user", "name", "Test User").release()
+    repo.config_writer().set_value("user", "email", "test@example.com").release()
 
-    # Test push (will fail as remote doesn't exist, but we can check error handling)
-    result = push_remote(repo, "test-remote")
-    assert not result["success"]
-    assert "error" in result
+    # Create initial content
+    test_file = test_repo_path / "test.txt"
+    test_file.write_text("Initial content")
+    repo.index.add(["test.txt"])
+    repo.index.commit("Initial commit")
+
+    # Add the source repo as a remote
+    result = add_remote(repo, "test-remote", str(source_repo_path))
+    assert result["success"]
+
+    # Get current branch name
+    current_branch = repo.active_branch.name
+
+    # Test push to the remote
+    result = push_remote(repo, "test-remote", current_branch)
+    assert result["success"]
+
+    # Create a second repository to test pulling
+    pull_repo_path = tmp_path / "pull_repo"
+    pull_repo = Repo.init(pull_repo_path)
+
+    # Configure Git user for the pull repo
+    pull_repo.config_writer().set_value("user", "name", "Test User").release()
+    pull_repo.config_writer().set_value("user", "email", "test@example.com").release()
+
+    # Add the source repo as a remote to the pull repo
+    result = add_remote(pull_repo, "test-remote", str(source_repo_path))
+    assert result["success"]
+
+    # Fetch first to get the remote branches
+    result = fetch_remote(pull_repo, "test-remote")
+    assert result["success"]
+
+    # Create and checkout the branch
+    pull_repo.git.checkout('-b', current_branch, f'test-remote/{current_branch}')
+
+    # Test pull from the remote
+    result = pull_remote(pull_repo, "test-remote", current_branch)
+    assert result["success"]
+
+    # Verify the content was pulled
+    assert (pull_repo_path / "test.txt").read_text() == "Initial content"
 
 
 def test_can_access_repository():
@@ -170,7 +226,7 @@ def test_can_access_repository():
     assert can_access_repository("https://github.com/torvalds/linux.git")
 
     # Test with invalid repository
-    assert not can_access_repository("https://github.com/invalid/invalid.git")
+    assert not can_access_repository("https://github.com/invalid/invalid-repo-that-does-not-exist.git")
 
 
 def test_check_for_conflicts_and_info(git_repo):

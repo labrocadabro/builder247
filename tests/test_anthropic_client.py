@@ -58,8 +58,13 @@ def string_reverser(text: str) -> str:
 
 
 @pytest.fixture
-def single_tool_choice():
+def calculator_tool_choice():
     return {"type": "tool", "name": "calculator"}
+
+
+@pytest.fixture
+def string_tool_choice():
+    return {"type": "tool", "name": "string_reverser"}
 
 
 @pytest.fixture
@@ -85,13 +90,13 @@ def test_send_test_message_no_api_key(monkeypatch):
         AnthropicClient()
 
 
-def test_send_message_with_tool(setup_environment, single_tool_choice):
+def test_send_message_with_tool(setup_environment, calculator_tool_choice):
     """Test that Claude can understand and use a tool definition."""
     client = setup_environment
     client.register_tool(calculator_tool(), calculator)
     response = client.send_message(
         "I need to add 5 and 3. Can you help me with that?",
-        tool_choice=single_tool_choice,
+        tool_choice=calculator_tool_choice,
     )
 
     assert isinstance(response, Message)
@@ -151,14 +156,15 @@ def test_send_message_with_multiple_tools(
     assert tool_use.input == {"text": "hello"}
 
 
-def test_send_message_with_tool_response(setup_environment, multiple_tool_choice):
+def test_send_message_with_tool_response(setup_environment, string_tool_choice):
     """Test that Claude can respond to a tool call."""
     client = setup_environment
     client.register_tool(string_tool(), string_reverser)
     message1 = client.send_message(
         "What is the reverse of 'hello'?",
-        tool_choice=multiple_tool_choice,
+        tool_choice=string_tool_choice,
     )
+    print("Message 1:", message1)
 
     assert isinstance(message1, Message)
     assert message1.stop_reason == "tool_use"
@@ -169,13 +175,24 @@ def test_send_message_with_tool_response(setup_environment, multiple_tool_choice
     assert tool_use.input == {"text": "hello"}
 
     message2 = client.send_message(
-        "Here is the result of the string reversal",
-        previous_messages=[{key}],
-        tool_response={
-            "tool_id": "string_reverser",
-            "tool_response": "olleh",
-        },
+        previous_messages=[
+            {"role": "user", "content": "What is the reverse of 'hello'?"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_use.id,
+                        "name": tool_use.name,
+                        "input": tool_use.input,
+                    }
+                ],
+            },
+        ],
+        tool_response="olleh",
+        tool_use_id=tool_use.id,
     )
+    print("Message 2:", message2)
     assert isinstance(message2, Message)
     assert isinstance(message2.content[0], TextBlock)
     assert "olleh" in message2.content[0].text

@@ -71,9 +71,7 @@ def copy_file(source: str, destination: str) -> Dict[str, Any]:
         # Create destination directory if it doesn't exist
         os.makedirs(os.path.dirname(destination), exist_ok=True)
 
-        result = execute_command(f"cp {source} {destination}")
-        if result[2] != 0:
-            raise Exception("Failed to copy file")
+        shutil.copy2(source, destination)
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
